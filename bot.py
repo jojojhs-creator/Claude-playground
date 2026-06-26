@@ -194,8 +194,9 @@ class TradingEngine:
                 if analysis.signal.value == "HOLD":
                     continue
 
-                # Check for existing position on this symbol
-                existing = await self._mt5(self._connector.get_open_positions, symbol)
+                # Check for existing position on this symbol (case-insensitive — Axi uses lowercase symbols)
+                all_positions = await self._mt5(self._connector.get_open_positions)
+                existing = [p for p in all_positions if p.symbol.upper() == symbol.upper()]
                 if existing:
                     logger.info("%s: position already open (ticket=%d) — skip",
                                 symbol, existing[0].ticket)

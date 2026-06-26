@@ -56,6 +56,16 @@ class RiskManager:
         order_type = OrderType.BUY if analysis.signal == Signal.BUY else OrderType.SELL
         entry_price = symbol_info.ask if order_type == OrderType.BUY else symbol_info.bid
 
+        if fixed_lot is not None:
+            # Resolve actual lot first so SL cap uses the real lot, not min_lot
+            step = symbol_info.volume_step
+            volume = math.floor(fixed_lot / step) * step
+            volume = max(symbol_info.volume_min, min(volume, symbol_info.volume_max))
+            volume = round(volume, 8)
+            logger.info("%s: using fixed lot size %.2f", analysis.symbol, volume)
+        else:
+            volume = None  # resolved after SL calculation
+
         sl_price, sl_distance = self._calculate_sl(
             order_type=order_type,
             entry_price=entry_price,
@@ -64,20 +74,14 @@ class RiskManager:
             sr_levels=analysis.sr_levels,
             digits=symbol_info.digits,
             symbol_info=symbol_info,
+            actual_lot=volume,  # None → uses min_lot cap; fixed → uses real lot cap
         )
 
         if sl_distance <= 0 or sl_distance != sl_distance:  # NaN check
             logger.warning("%s: SL distance is zero/NaN, skipping", analysis.symbol)
             return None
 
-        if fixed_lot is not None:
-            # Use fixed lot size, clamped to broker limits
-            step = symbol_info.volume_step
-            volume = math.floor(fixed_lot / step) * step
-            volume = max(symbol_info.volume_min, min(volume, symbol_info.volume_max))
-            volume = round(volume, 8)
-            logger.info("%s: using fixed lot size %.2f", analysis.symbol, volume)
-        else:
+        if volume is None:
             volume = self._calculate_lot_size(
                 sl_distance=sl_distance,
                 equity=account.equity,
@@ -129,36 +133,47 @@ class RiskManager:
         sr_levels: SRLevels,
         digits: int,
         symbol_info: SymbolInfo,
+        actual_lot: float | None = None,
     ) -> tuple[float, float]:
         """
         Returns (sl_price, sl_distance_in_price_units).
         Raw SL = 1× ATR from entry. Adjusted to nearest S/R if closer.
-        Hard cap: SL cannot risk more than 2% of equity at minimum lot.
+        Hard cap: SL cannot risk more than 2% of equity at the given lot size.
         """
         raw_sl_distance = atr * 1.0
 
-        # Adjust SL to nearest S/R level if it gives a natural structure level
+        # Adjust SL toward nearest S/R structure if it is tighter than ATR
         if order_type == OrderType.BUY and sr_levels.supports:
-            nearest_support = max(s for s in sr_levels.supports if s < entry_price)
-            structure_distance = entry_price - nearest_support
-            # Use structure SL if it's tighter than ATR-based (better risk/reward)
-            if 0 < structure_distance < raw_sl_distance:
-                raw_sl_distance = structure_distance
-                logger.debug("%s BUY: using structure SL at %.5g (vs ATR-based %.5g)",
-                             symbol_info.name, nearest_support, entry_price - atr)
+            supports_below = [s for s in sr_levels.supports if s < entry_price]
+            if supports_below:
+                nearest_support = max(supports_below)
+                structure_distance = entry_price - nearest_support
+                if 0 < structure_distance < raw_sl_distance:
+                    raw_sl_distance = structure_distance
 
         elif order_type == OrderType.SELL and sr_levels.resistances:
-            nearest_resistance = min(r for r in sr_levels.resistances if r > entry_price)
-            structure_distance = nearest_resistance - entry_price
-            if 0 < structure_distance < raw_sl_distance:
-                raw_sl_distance = structure_distance
+            resistances_above = [r for r in sr_levels.resistances if r > entry_price]
+            if resistances_above:
+                nearest_resistance = min(resistances_above)
+                structure_distance = nearest_resistance - entry_price
+                if 0 < structure_distance < raw_sl_distance:
+                    raw_sl_distance = structure_distance
 
-        # Cap SL at 2% of equity: max USD risk at min lot → max SL distance
+        # Cap SL so that loss at SL ≤ 2% equity.
+        # Use actual_lot if known (fixed lot), otherwise fall back to min_lot.
         unit_value = symbol_info.trade_contract_size
-        min_lot = symbol_info.volume_min
+        lot_for_cap = actual_lot if actual_lot and actual_lot > 0 else symbol_info.volume_min
         max_risk_usd = equity * (self._cfg.max_risk_percent / 100)
-        max_sl_distance_for_min_lot = max_risk_usd / (unit_value * min_lot)
-        sl_distance = min(raw_sl_distance, max_sl_distance_for_min_lot)
+        if unit_value > 0 and lot_for_cap > 0:
+            max_sl_distance = max_risk_usd / (unit_value * lot_for_cap)
+            sl_distance = min(raw_sl_distance, max_sl_distance)
+        else:
+            sl_distance = raw_sl_distance
+
+        logger.info("%s %s: ATR=%.5g raw_sl_dist=%.5g final_sl_dist=%.5g sl=%.5g lot=%.3f contract=%.2f",
+                    symbol_info.name, order_type.value, atr, raw_sl_distance, sl_distance,
+                    entry_price + sl_distance if order_type.value == "SELL" else entry_price - sl_distance,
+                    lot_for_cap, unit_value)
 
         if order_type == OrderType.BUY:
             sl_price = round(entry_price - sl_distance, digits)
