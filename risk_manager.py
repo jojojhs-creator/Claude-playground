@@ -39,16 +39,18 @@ class RiskManager:
         analysis: AnalysisResult,
         account: AccountInfo,
         symbol_info: SymbolInfo,
+        fixed_lot: float | None = None,
     ) -> TradeParameters | None:
         """
         Full risk calculation pipeline.
         Returns None if signal is HOLD or risk cannot be managed safely.
+        If fixed_lot is provided, skips dynamic lot sizing.
         """
         if analysis.signal == Signal.HOLD:
             return None
 
-        if analysis.atr <= 0:
-            logger.warning("%s: ATR is zero or negative, skipping trade", analysis.symbol)
+        if analysis.atr <= 0 or (isinstance(analysis.atr, float) and analysis.atr != analysis.atr):
+            logger.warning("%s: ATR is zero/NaN, skipping trade", analysis.symbol)
             return None
 
         order_type = OrderType.BUY if analysis.signal == Signal.BUY else OrderType.SELL
@@ -64,15 +66,23 @@ class RiskManager:
             symbol_info=symbol_info,
         )
 
-        if sl_distance <= 0:
-            logger.warning("%s: SL distance is zero, skipping", analysis.symbol)
+        if sl_distance <= 0 or sl_distance != sl_distance:  # NaN check
+            logger.warning("%s: SL distance is zero/NaN, skipping", analysis.symbol)
             return None
 
-        volume = self._calculate_lot_size(
-            sl_distance=sl_distance,
-            equity=account.equity,
-            symbol_info=symbol_info,
-        )
+        if fixed_lot is not None:
+            # Use fixed lot size, clamped to broker limits
+            step = symbol_info.volume_step
+            volume = math.floor(fixed_lot / step) * step
+            volume = max(symbol_info.volume_min, min(volume, symbol_info.volume_max))
+            volume = round(volume, 8)
+            logger.info("%s: using fixed lot size %.2f", analysis.symbol, volume)
+        else:
+            volume = self._calculate_lot_size(
+                sl_distance=sl_distance,
+                equity=account.equity,
+                symbol_info=symbol_info,
+            )
 
         if volume is None:
             return None

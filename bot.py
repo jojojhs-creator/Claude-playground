@@ -112,9 +112,20 @@ class TradingEngine:
         account = await self._mt5(self._connector.get_account_info)
         symbol_info = await self._mt5(self._connector.get_symbol_info, analysis.symbol)
 
-        params = self._risk_manager.calculate_trade_parameters(analysis, account, symbol_info)
+        fixed_lot = self._config.fixed_lots.get(analysis.symbol)
+        params = self._risk_manager.calculate_trade_parameters(analysis, account, symbol_info, fixed_lot=fixed_lot)
         if params is None:
-            logger.info("%s: RiskManager returned None — skipping trade", analysis.symbol)
+            logger.warning("%s: RiskManager returned None — trade skipped (ATR=%.5g, equity=%.2f, vol_min=%.3f, contract=%.1f)",
+                           analysis.symbol, analysis.atr, account.equity,
+                           symbol_info.volume_min, symbol_info.trade_contract_size)
+            if self._tg_bot:
+                await self._tg_bot.send_message_to_all(
+                    f"⚠️ *Trade skipped: {analysis.symbol}*\n"
+                    f"Signal: `{analysis.signal.value}` | ATR: `{analysis.atr:.5g}`\n"
+                    f"Equity: `{account.equity:.2f}` | Min lot: `{symbol_info.volume_min}` "
+                    f"| Contract: `{symbol_info.trade_contract_size}`\n"
+                    f"_Risk parameters could not be met — see bot logs_"
+                )
             return False
 
         try:

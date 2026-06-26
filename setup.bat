@@ -39,8 +39,17 @@ set /p MT5_LOGIN=MT5 Account Number:
 set /p MT5_PASSWORD=MT5 Password (press Enter if none):
 set /p MT5_SERVER=MT5 Server (e.g. Axi-US50-Demo):
 set /p TG_TOKEN=Telegram Bot Token:
-set /p TG_CHAT=Telegram Chat ID:
+set /p TG_CHAT=Your Telegram Chat ID:
+set /p TG_CHAT2=Second Telegram Chat ID (optional, press Enter to skip):
 set /p SYMBOLS=Symbols to trade (e.g. XAUUSD,BTCUSD):
+echo.
+echo Fixed lot sizes (leave blank to use automatic risk-based sizing):
+set /p XAUUSD_LOT=XAUUSD fixed lot size (e.g. 0.01, press Enter to skip):
+set /p BTCUSD_LOT=BTCUSD fixed lot size (e.g. 0.03, press Enter to skip):
+
+:: Build chat ID list
+set TG_CHATS=%TG_CHAT%
+if not "%TG_CHAT2%"=="" set TG_CHATS=%TG_CHAT%,%TG_CHAT2%
 
 echo.
 echo [..] Creating .env file...
@@ -52,11 +61,14 @@ echo [..] Creating .env file...
     echo MT5_PATH=
     echo.
     echo TELEGRAM_BOT_TOKEN=%TG_TOKEN%
-    echo TELEGRAM_ALLOWED_CHAT_IDS=%TG_CHAT%
+    echo TELEGRAM_ALLOWED_CHAT_IDS=%TG_CHATS%
     echo.
     echo SYMBOLS=%SYMBOLS%
     echo TIMEZONE=UTC
     echo MAX_RISK_PERCENT=2.0
+    echo.
+    echo XAUUSD_LOT=%XAUUSD_LOT%
+    echo BTCUSD_LOT=%BTCUSD_LOT%
     echo.
     echo EMA_FAST=20
     echo EMA_SLOW=50

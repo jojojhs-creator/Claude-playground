@@ -64,6 +64,7 @@ class AppConfig:
     timezone: str
     log_level: str
     log_file: str
+    fixed_lots: dict = field(default_factory=dict)  # symbol → fixed lot size
 
 
 def _require(key: str) -> str:
@@ -124,6 +125,18 @@ def load_config(env_file: str = ".env") -> AppConfig:
     if not (0 < max_risk <= 10):
         raise ConfigError(f"MAX_RISK_PERCENT must be between 0 and 10, got: {max_risk}")
 
+    # Per-symbol fixed lot sizes (e.g. XAUUSD_LOT=0.01, BTCUSD_LOT=0.03)
+    fixed_lots: dict[str, float] = {}
+    for sym in symbols:
+        lot_raw = os.getenv(f"{sym.upper()}_LOT", "").strip()
+        if lot_raw:
+            try:
+                lot_val = float(lot_raw)
+                if lot_val > 0:
+                    fixed_lots[sym] = lot_val
+            except ValueError:
+                raise ConfigError(f"{sym}_LOT must be a float, got: {lot_raw!r}")
+
     return AppConfig(
         mt5=MT5Config(
             login=login,
@@ -160,4 +173,5 @@ def load_config(env_file: str = ".env") -> AppConfig:
         timezone=os.getenv("TIMEZONE", "UTC").strip() or "UTC",
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_file=os.getenv("LOG_FILE", "logs/trading_bot.log").strip() or "logs/trading_bot.log",
+        fixed_lots=fixed_lots,
     )

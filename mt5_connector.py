@@ -52,6 +52,7 @@ class SymbolInfo:
     volume_step: float
     trade_contract_size: float
     currency_profit: str
+    trade_stops_level: int = 0  # broker min stop distance in points
 
 
 @dataclass
@@ -210,6 +211,7 @@ class MT5Connector:
             volume_step=info.volume_step,
             trade_contract_size=info.trade_contract_size,
             currency_profit=info.currency_profit,
+            trade_stops_level=int(info.trade_stops_level),
         )
 
     @_with_reconnect()
@@ -278,6 +280,25 @@ class MT5Connector:
             else:
                 price = tick.bid
                 mt5_type = mt5.ORDER_TYPE_SELL
+
+            # Enforce broker minimum stop distance (trade_stops_level)
+            sym_info = mt5.symbol_info(symbol)
+            if sym_info and sym_info.trade_stops_level > 0:
+                min_dist = (sym_info.trade_stops_level + 10) * sym_info.point
+                if order_type == OrderType.BUY:
+                    if sl > 0 and (price - sl) < min_dist:
+                        sl = round(price - min_dist, sym_info.digits)
+                        logger.info("SL adjusted to meet min stop distance: %.5g", sl)
+                    if tp > 0 and (tp - price) < min_dist:
+                        tp = round(price + min_dist, sym_info.digits)
+                        logger.info("TP adjusted to meet min stop distance: %.5g", tp)
+                else:
+                    if sl > 0 and (sl - price) < min_dist:
+                        sl = round(price + min_dist, sym_info.digits)
+                        logger.info("SL adjusted to meet min stop distance: %.5g", sl)
+                    if tp > 0 and (price - tp) < min_dist:
+                        tp = round(price - min_dist, sym_info.digits)
+                        logger.info("TP adjusted to meet min stop distance: %.5g", tp)
 
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
