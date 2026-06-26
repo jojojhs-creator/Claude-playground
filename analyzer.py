@@ -234,24 +234,24 @@ class TechnicalAnalyzer:
             and abs(close - nearest_support) / close < 0.003
         )
 
-        # BUY conditions
+        # BUY conditions (need 5 out of 7)
         buy_conditions = [
             d1_bullish,
             h4_bullish,
             above_sma200 is True,
             ma_bull_stack,
-            45 < m15_rsi < 70,
+            40 < m15_rsi < 75,
             m15_macd_hist > 0,
             not at_resistance,
         ]
 
-        # SELL conditions
+        # SELL conditions (need 5 out of 7)
         sell_conditions = [
             d1_bearish,
             h4_bearish,
             above_sma200 is False,
             ma_bear_stack,
-            30 < m15_rsi < 55,
+            25 < m15_rsi < 60,
             m15_macd_hist < 0,
             not at_support,
         ]
@@ -259,8 +259,9 @@ class TechnicalAnalyzer:
         buy_score = sum(1 for c in buy_conditions if c)
         sell_score = sum(1 for c in sell_conditions if c)
 
-        # Require all 7 conditions for a high-conviction signal
-        if buy_score == len(buy_conditions):
+        SIGNAL_THRESHOLD = 5  # out of 7 conditions required
+
+        if buy_score >= SIGNAL_THRESHOLD:
             rationale = (
                 f"BUY signal — D1/H4 bullish, M15 MA stack bullish, "
                 f"RSI={m15_rsi:.1f}, MACD hist={m15_macd_hist:.4f}, "
@@ -268,7 +269,7 @@ class TechnicalAnalyzer:
             )
             return Signal.BUY, rationale
 
-        if sell_score == len(sell_conditions):
+        if sell_score >= SIGNAL_THRESHOLD:
             rationale = (
                 f"SELL signal — D1/H4 bearish, M15 MA stack bearish, "
                 f"RSI={m15_rsi:.1f}, MACD hist={m15_macd_hist:.4f}, "

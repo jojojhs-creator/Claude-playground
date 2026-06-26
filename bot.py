@@ -145,7 +145,7 @@ class TradingEngine:
     async def run_scan_cycle(self) -> None:
         """15-minute scan cycle: analyze all symbols and trade on signals."""
         self._last_scan = datetime.utcnow()
-        self._next_scan = self._last_scan + timedelta(minutes=15)
+        self._next_scan = self._last_scan + timedelta(minutes=5)
         logger.info("=== Scan cycle started at %s ===", self._last_scan.strftime("%H:%M:%S UTC"))
 
         if not self.trading_enabled:
@@ -288,10 +288,10 @@ async def main() -> None:
     scheduler = AsyncIOScheduler(timezone=config.timezone)
     scheduler.add_job(
         engine.run_scan_cycle,
-        trigger=IntervalTrigger(minutes=15),
+        trigger=IntervalTrigger(minutes=5),
         id="scan_cycle",
-        name="15-minute scan cycle",
-        misfire_grace_time=120,
+        name="5-minute scan cycle",
+        misfire_grace_time=60,
         coalesce=True,
         max_instances=1,
     )
@@ -330,7 +330,7 @@ async def main() -> None:
         await tg_bot.send_message_to_all(
             f"🚀 *MT5 Bot started*\n"
             f"Symbols: `{', '.join(config.symbols)}`\n"
-            f"Scanning every 15 minutes\n"
+            f"Scanning every 5 minutes\n"
             f"Max risk per trade: `{config.risk.max_risk_percent}%`"
         )
 
