@@ -29,7 +29,6 @@ class Signal(Enum):
 class TrendStrength:
     adx: float
     label: str          # "weak" | "medium" | "strong"
-    tp_multiplier: float
 
 
 @dataclass
@@ -94,7 +93,7 @@ class TechnicalAnalyzer:
         m15 = df_m15.iloc[-2]
 
         close = float(m15["close"])
-        atr = float(h1.get("atr", m15.get("atr", 0)))
+        atr = float(m15.get("atr", h1.get("atr", 0)))
         adx = float(m15.get("adx", 0))
         trend_strength = self._classify_trend_strength(adx)
 
@@ -312,12 +311,12 @@ class TechnicalAnalyzer:
         return Signal.HOLD, rationale
 
     def _classify_trend_strength(self, adx: float) -> TrendStrength:
-        if adx >= self._risk.trend_strong_threshold:
-            return TrendStrength(adx=adx, label="strong", tp_multiplier=self._risk.tp_multiplier_strong)
-        elif adx >= self._risk.trend_weak_threshold:
-            return TrendStrength(adx=adx, label="medium", tp_multiplier=self._risk.tp_multiplier_medium)
+        if adx >= 50:
+            return TrendStrength(adx=adx, label="strong")
+        elif adx >= 25:
+            return TrendStrength(adx=adx, label="medium")
         else:
-            return TrendStrength(adx=adx, label="weak", tp_multiplier=self._risk.tp_multiplier_weak)
+            return TrendStrength(adx=adx, label="weak")
 
     def _detect_swing_levels(self, df_h4: pd.DataFrame, close: float) -> SRLevels:
         """

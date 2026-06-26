@@ -94,8 +94,7 @@ class RiskManager:
         tp_price, tp_distance = self._calculate_tp(
             order_type=order_type,
             entry_price=entry_price,
-            atr=analysis.atr,
-            trend_strength=analysis.trend_strength,
+            sl_distance=sl_distance,
             sr_levels=analysis.sr_levels,
             digits=symbol_info.digits,
         )
@@ -140,7 +139,7 @@ class RiskManager:
         Raw SL = 1× ATR from entry. Adjusted to nearest S/R if closer.
         Hard cap: SL cannot risk more than 2% of equity at the given lot size.
         """
-        raw_sl_distance = atr * 1.0
+        raw_sl_distance = atr * self._cfg.sl_atr_multiplier
 
         # Adjust SL toward nearest S/R structure if it is tighter than ATR
         if order_type == OrderType.BUY and sr_levels.supports:
@@ -186,20 +185,18 @@ class RiskManager:
         self,
         order_type: OrderType,
         entry_price: float,
-        atr: float,
-        trend_strength,
+        sl_distance: float,
         sr_levels: SRLevels,
         digits: int,
     ) -> tuple[float, float]:
         """
         Returns (tp_price, tp_distance).
-        Base TP = ATR × trend multiplier. Snaps to nearest S/R if within ±15%.
+        TP = SL distance × rr_ratio (fixed 1:N risk-reward). Snaps to nearest S/R if within ±15%.
         """
-        raw_tp_distance = atr * trend_strength.tp_multiplier
+        raw_tp_distance = sl_distance * self._cfg.rr_ratio
 
         if order_type == OrderType.BUY:
             raw_tp_price = entry_price + raw_tp_distance
-            # Snap to nearest resistance within ±15% of raw TP
             candidate = self._snap_to_sr(raw_tp_price, sr_levels.resistances, tolerance=0.15)
             tp_price = candidate if candidate else raw_tp_price
         else:

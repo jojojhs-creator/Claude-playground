@@ -70,6 +70,9 @@ echo [..] Creating .env file...
     echo XAUUSD_LOT=%XAUUSD_LOT%
     echo BTCUSD_LOT=%BTCUSD_LOT%
     echo.
+    echo SL_ATR_MULTIPLIER=0.5
+    echo RR_RATIO=3.0
+    echo.
     echo EMA_FAST=20
     echo EMA_SLOW=50
     echo EMA_100=100
@@ -81,12 +84,6 @@ echo [..] Creating .env file...
     echo ATR_PERIOD=14
     echo ADX_PERIOD=14
     echo SR_LOOKBACK=50
-    echo.
-    echo TREND_WEAK_THRESHOLD=25.0
-    echo TREND_STRONG_THRESHOLD=50.0
-    echo TP_MULTIPLIER_WEAK=1.5
-    echo TP_MULTIPLIER_MEDIUM=2.5
-    echo TP_MULTIPLIER_STRONG=3.5
     echo.
     echo LOG_LEVEL=INFO
     echo LOG_FILE=logs/trading_bot.log

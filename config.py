@@ -32,11 +32,8 @@ class TelegramConfig:
 @dataclass
 class RiskConfig:
     max_risk_percent: float
-    trend_weak_threshold: float
-    trend_strong_threshold: float
-    tp_multiplier_weak: float
-    tp_multiplier_medium: float
-    tp_multiplier_strong: float
+    sl_atr_multiplier: float   # fraction of ATR used for SL distance (e.g. 0.5 for scalping)
+    rr_ratio: float            # TP = SL distance × rr_ratio (e.g. 3.0 for 1:3)
 
 
 @dataclass
@@ -150,11 +147,8 @@ def load_config(env_file: str = ".env") -> AppConfig:
         ),
         risk=RiskConfig(
             max_risk_percent=max_risk,
-            trend_weak_threshold=_float("TREND_WEAK_THRESHOLD", 25.0),
-            trend_strong_threshold=_float("TREND_STRONG_THRESHOLD", 50.0),
-            tp_multiplier_weak=_float("TP_MULTIPLIER_WEAK", 1.5),
-            tp_multiplier_medium=_float("TP_MULTIPLIER_MEDIUM", 2.5),
-            tp_multiplier_strong=_float("TP_MULTIPLIER_STRONG", 3.5),
+            sl_atr_multiplier=_float("SL_ATR_MULTIPLIER", 0.5),
+            rr_ratio=_float("RR_RATIO", 3.0),
         ),
         indicators=IndicatorConfig(
             ema_fast=_int("EMA_FAST", 20),
