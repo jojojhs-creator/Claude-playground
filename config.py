@@ -127,7 +127,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
     return AppConfig(
         mt5=MT5Config(
             login=login,
-            password=_require("MT5_PASSWORD"),
+            password=os.getenv("MT5_PASSWORD", ""),
             server=_require("MT5_SERVER"),
             path=mt5_path,
         ),
