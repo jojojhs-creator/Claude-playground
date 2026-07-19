@@ -62,6 +62,10 @@ class AppConfig:
     log_level: str
     log_file: str
     fixed_lots: dict = field(default_factory=dict)  # symbol → fixed lot size
+    scalp_mode: bool = False            # True → M15/M5/M1 timeframes instead of D1/H4/H1/M15
+    scan_interval_seconds: int = 300    # how often the scan cycle runs
+    max_positions_per_symbol: int = 1   # concurrent positions allowed per symbol
+    max_trade_age_minutes: int = 0      # close bot trades older than this (0 = disabled)
 
 
 def _require(key: str) -> str:
@@ -134,6 +138,8 @@ def load_config(env_file: str = ".env") -> AppConfig:
             except ValueError:
                 raise ConfigError(f"{sym}_LOT must be a float, got: {lot_raw!r}")
 
+    scalp_mode = os.getenv("SCALP_MODE", "false").strip().lower() in ("1", "true", "yes")
+
     return AppConfig(
         mt5=MT5Config(
             login=login,
@@ -168,4 +174,8 @@ def load_config(env_file: str = ".env") -> AppConfig:
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         log_file=os.getenv("LOG_FILE", "logs/trading_bot.log").strip() or "logs/trading_bot.log",
         fixed_lots=fixed_lots,
+        scalp_mode=scalp_mode,
+        scan_interval_seconds=_int("SCAN_INTERVAL_SECONDS", 60 if scalp_mode else 300),
+        max_positions_per_symbol=_int("MAX_POSITIONS_PER_SYMBOL", 3 if scalp_mode else 1),
+        max_trade_age_minutes=_int("MAX_TRADE_AGE_MINUTES", 15 if scalp_mode else 0),
     )

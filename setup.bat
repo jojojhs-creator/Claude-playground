@@ -70,8 +70,13 @@ echo [..] Creating .env file...
     echo XAUUSD_LOT=%XAUUSD_LOT%
     echo BTCUSD_LOT=%BTCUSD_LOT%
     echo.
-    echo SL_ATR_MULTIPLIER=0.5
+    echo SL_ATR_MULTIPLIER=1.0
     echo RR_RATIO=3.0
+    echo.
+    echo SCALP_MODE=true
+    echo SCAN_INTERVAL_SECONDS=60
+    echo MAX_POSITIONS_PER_SYMBOL=3
+    echo MAX_TRADE_AGE_MINUTES=15
     echo.
     echo EMA_FAST=20
     echo EMA_SLOW=50

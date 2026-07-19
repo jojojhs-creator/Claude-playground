@@ -72,6 +72,7 @@ class TradingEngine:
         self.trading_enabled = True
         self.symbols = config.symbols
         self._known_position_tickets: set[int] = set()
+        self._position_open_times: dict[int, datetime] = {}  # bot-opened ticket → UTC open time
         self._last_scan: datetime | None = None
         self._next_scan: datetime | None = None
         self._tg_bot: TradingBotTelegram | None = None
@@ -90,6 +91,19 @@ class TradingEngine:
 
     async def analyze_symbol(self, symbol: str) -> AnalysisResult:
         """Fetch 4 timeframes and run multi-timeframe analysis."""
+        if self._config.scalp_mode:
+            # Scalp mode: M15 macro trend, M5 intermediate, M1 trigger.
+            # The analyzer slots are timeframe-agnostic, so we feed faster charts
+            # into the same D1/H4/H1/M15 positions. ATR then comes from M1 → tight stops.
+            tf_m15 = mt5.TIMEFRAME_M15 if mt5 else 15
+            tf_m5 = mt5.TIMEFRAME_M5 if mt5 else 5
+            tf_m1 = mt5.TIMEFRAME_M1 if mt5 else 1
+
+            df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 300)
+            df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, 300)
+            df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m1, 300)
+            return self.analyzer.analyze(symbol, df_macro, df_mid, df_mid, df_trigger)
+
         tf_d1 = mt5.TIMEFRAME_D1 if mt5 else 16408
         tf_h4 = mt5.TIMEFRAME_H4 if mt5 else 16388
         tf_h1 = mt5.TIMEFRAME_H1 if mt5 else 16385
@@ -146,6 +160,9 @@ class TradingEngine:
                 )
             return False
 
+        # Track open time locally for the time-based exit (avoids MT5 server-time offsets)
+        self._position_open_times[result.ticket] = datetime.utcnow()
+
         if self._tg_bot:
             await self._tg_bot.send_trade_opened(result, params)
 
@@ -154,9 +171,9 @@ class TradingEngine:
     # ── Scheduled jobs ───────────────────────────────────────────────────────
 
     async def run_scan_cycle(self) -> None:
-        """15-minute scan cycle: analyze all symbols and trade on signals."""
+        """Scan cycle: analyze all symbols and trade on signals."""
         self._last_scan = datetime.utcnow()
-        self._next_scan = self._last_scan + timedelta(minutes=5)
+        self._next_scan = self._last_scan + timedelta(seconds=self._config.scan_interval_seconds)
         logger.info("=== Scan cycle started at %s ===", self._last_scan.strftime("%H:%M:%S UTC"))
 
         if not self.trading_enabled:
@@ -194,12 +211,12 @@ class TradingEngine:
                 if analysis.signal.value == "HOLD":
                     continue
 
-                # Check for existing position on this symbol (case-insensitive — Axi uses lowercase symbols)
+                # Check existing positions on this symbol (case-insensitive — Axi uses lowercase symbols)
                 all_positions = await self._mt5(self._connector.get_open_positions)
                 existing = [p for p in all_positions if p.symbol.upper() == symbol.upper()]
-                if existing:
-                    logger.info("%s: position already open (ticket=%d) — skip",
-                                symbol, existing[0].ticket)
+                if len(existing) >= self._config.max_positions_per_symbol:
+                    logger.info("%s: %d position(s) open (max %d) — skip",
+                                symbol, len(existing), self._config.max_positions_per_symbol)
                     continue
 
                 opened = await self.execute_trade(analysis)
@@ -228,6 +245,27 @@ class TradingEngine:
             current_positions = await self._mt5(self._connector.get_open_positions)
             current_tickets = {p.ticket for p in current_positions}
 
+            # Time-based exit: close bot trades that exceeded max age (scalp mode)
+            if self._config.max_trade_age_minutes > 0:
+                now = datetime.utcnow()
+                max_age = timedelta(minutes=self._config.max_trade_age_minutes)
+                for p in current_positions:
+                    opened = self._position_open_times.get(p.ticket)
+                    if opened and (now - opened) > max_age:
+                        logger.info("Ticket %d (%s) older than %d min — time exit (P/L %.2f)",
+                                    p.ticket, p.symbol, self._config.max_trade_age_minutes, p.profit)
+                        try:
+                            await self._mt5(self._connector.close_position, p.ticket)
+                            self._position_open_times.pop(p.ticket, None)
+                            if self._tg_bot:
+                                await self._tg_bot.send_message_to_all(
+                                    f"⏱ *Time exit: {p.symbol}*\n"
+                                    f"Ticket `{p.ticket}` held > {self._config.max_trade_age_minutes} min\n"
+                                    f"P/L: `{p.profit:+.2f}`"
+                                )
+                        except Exception as e:
+                            logger.error("Time exit failed for ticket %d: %s", p.ticket, e)
+
             # Find tickets that were known but are now gone
             closed_tickets = self._known_position_tickets - current_tickets
 
@@ -243,6 +281,10 @@ class TradingEngine:
                         await self._tg_bot.send_trade_closed(deal)
 
             self._known_position_tickets = current_tickets
+            # Prune open-time entries for tickets that no longer exist
+            self._position_open_times = {
+                t: v for t, v in self._position_open_times.items() if t in current_tickets
+            }
         except Exception as e:
             logger.error("Position monitor error: %s", e)
 
@@ -298,12 +340,13 @@ async def main() -> None:
     logger.info("Startup: %d open position(s) found", len(initial_positions))
 
     scheduler = AsyncIOScheduler(timezone=config.timezone)
+    scan_seconds = config.scan_interval_seconds
     scheduler.add_job(
         engine.run_scan_cycle,
-        trigger=IntervalTrigger(minutes=5),
+        trigger=IntervalTrigger(seconds=scan_seconds),
         id="scan_cycle",
-        name="5-minute scan cycle",
-        misfire_grace_time=60,
+        name=f"{scan_seconds}s scan cycle",
+        misfire_grace_time=min(60, scan_seconds),
         coalesce=True,
         max_instances=1,
     )
@@ -317,7 +360,7 @@ async def main() -> None:
         max_instances=1,
     )
     scheduler.start()
-    logger.info("Scheduler started: scan every 15 min, monitor every 30 sec")
+    logger.info("Scheduler started: scan every %ds, monitor every 30 sec", scan_seconds)
 
     # Shutdown handler
     stop_event = asyncio.Event()
@@ -339,10 +382,16 @@ async def main() -> None:
         await application.updater.start_polling(drop_pending_updates=True)
 
         # Send startup notification
+        mode_line = (
+            f"⚡ Scalp mode: M1 trigger, max {config.max_positions_per_symbol} trades/symbol, "
+            f"time exit {config.max_trade_age_minutes} min\n"
+            if config.scalp_mode else ""
+        )
         await tg_bot.send_message_to_all(
             f"🚀 *MT5 Bot started*\n"
             f"Symbols: `{', '.join(config.symbols)}`\n"
-            f"Scanning every 5 minutes\n"
+            f"{mode_line}"
+            f"Scanning every {config.scan_interval_seconds} seconds\n"
             f"Max risk per trade: `{config.risk.max_risk_percent}%`"
         )
 
