@@ -1,16 +1,21 @@
 //@version=5
-// Gold Scalper — Buy/Sell Signals + Liquidity Sweeps
-// Companion indicator to the MT5 Telegram bot: same EMA-stack / RSI / MACD
-// voting logic, plus liquidity-sweep detection that fires on the sweep candle.
+// Gold Scalper — Buy/Sell Signals + Liquidity Sweeps (v2, accuracy filters)
+// Companion indicator to the MT5 Telegram bot.
 //
 // Signals:
-//   BUY / SELL   — score-based trend signal (5 of 6 conditions)
+//   BUY / SELL   — score-based trend signal (5 of 6 conditions) + filters
 //   SWEEP BUY    — wick BELOW a recent low, close back above it → immediate long
 //   SWEEP SELL   — wick ABOVE a recent high, close back below it → immediate short
 //
+// v2 accuracy filters (all toggleable in settings):
+//   1. Higher-timeframe trend confirmation (default 15m when scalping M1)
+//   2. ADX chop filter — no trend signals when ADX is below threshold
+//   3. Volume confirmation on sweeps — real liquidity grabs come with volume
+//   4. Minimum wick depth (ATR-scaled) — tiny pokes below a low don't count
+//
 // Set alerts with trigger "Once Per Bar Close" to avoid repainting.
 
-indicator("Gold Scalper — Signals + Liquidity Sweeps", overlay=true)
+indicator("Gold Scalper — Signals + Liquidity Sweeps v2", overlay=true)
 
 // ── Inputs ────────────────────────────────────────────────────────────────────
 emaFastLen = input.int(20, "EMA fast", minval=1, group="Trend")
@@ -24,6 +29,16 @@ rsiBuyMax = input.int(75, "RSI buy max", group="Momentum")
 rsiSellMin = input.int(25, "RSI sell min", group="Momentum")
 rsiSellMax = input.int(60, "RSI sell max", group="Momentum")
 
+useHtf = input.bool(true, "Confirm with higher timeframe trend", group="Filter: Higher Timeframe")
+htfChoice = input.string("Auto", "Higher timeframe", options=["Auto", "5", "15", "30", "60", "240"], group="Filter: Higher Timeframe")
+
+useAdx = input.bool(true, "Skip trend signals in chop (ADX filter)", group="Filter: ADX")
+adxMin = input.int(20, "Minimum ADX for trend signals", minval=1, group="Filter: ADX")
+
+useVol = input.bool(true, "Sweeps need above-average volume", group="Filter: Sweep Quality")
+volMult = input.float(1.2, "Volume must exceed 20-bar average ×", minval=0.5, step=0.1, group="Filter: Sweep Quality")
+minWickAtr = input.float(0.1, "Min wick depth beyond level (× ATR)", minval=0.0, step=0.05, group="Filter: Sweep Quality")
+
 sweepLook = input.int(20, "Sweep lookback (bars)", minval=3, group="Liquidity Sweep")
 sweepTrendFilter = input.bool(false, "Sweep must agree with EMA trend", group="Liquidity Sweep")
 
@@ -35,7 +50,19 @@ emaS = ta.ema(close, emaSlowLen)
 ema1 = ta.ema(close, ema100Len)
 sma2 = ta.sma(close, sma200Len)
 rsiV = ta.rsi(close, rsiLen)
+atrV = ta.atr(14)
 [macdLine, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+[diPlus, diMinus, adxV] = ta.dmi(14, 14)
+volMA = ta.sma(volume, 20)
+
+// ── Higher-timeframe trend (non-repainting: uses last COMPLETED HTF bar) ─────
+// "Auto" picks the confirmation TF from the chart TF: M1→15m, M5→30m, M15→1h, 1h→4h
+autoHtf = not timeframe.isintraday ? "D" : timeframe.multiplier <= 1 ? "15" : timeframe.multiplier <= 5 ? "30" : timeframe.multiplier <= 15 ? "60" : timeframe.multiplier <= 60 ? "240" : "D"
+htfTf = htfChoice == "Auto" ? autoHtf : htfChoice
+htfEmaF = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaFastLen)[1], lookahead=barmerge.lookahead_on)
+htfEmaS = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaSlowLen)[1], lookahead=barmerge.lookahead_on)
+htfBull = htfEmaF > htfEmaS
+htfBear = htfEmaF < htfEmaS
 
 // ── Score-based BUY/SELL (mirrors the MT5 bot: needs 5 of 6) ─────────────────
 bull1 = emaF > emaS
@@ -55,8 +82,13 @@ bear6 = close < emaF
 buyScore = (bull1 ? 1 : 0) + (bull2 ? 1 : 0) + (bull3 ? 1 : 0) + (bull4 ? 1 : 0) + (bull5 ? 1 : 0) + (bull6 ? 1 : 0)
 sellScore = (bear1 ? 1 : 0) + (bear2 ? 1 : 0) + (bear3 ? 1 : 0) + (bear4 ? 1 : 0) + (bear5 ? 1 : 0) + (bear6 ? 1 : 0)
 
-buyRaw = buyScore >= 5
-sellRaw = sellScore >= 5
+// Filters applied on top of the score
+adxOk = not useAdx or adxV >= adxMin
+htfBuyOk = not useHtf or htfBull
+htfSellOk = not useHtf or htfBear
+
+buyRaw = buyScore >= 5 and adxOk and htfBuyOk
+sellRaw = sellScore >= 5 and adxOk and htfSellOk
 
 var int lastBuyBar = -99999
 var int lastSellBar = -99999
@@ -73,8 +105,14 @@ recentLow = ta.lowest(low[1], sweepLook)
 recentHigh = ta.highest(high[1], sweepLook)
 
 midBar = (high + low) / 2
-bullSweep = low < recentLow and close > recentLow and close > midBar
-bearSweep = high > recentHigh and close < recentHigh and close < midBar
+wickDepthLow = recentLow - low
+wickDepthHigh = high - recentHigh
+wickOkLow = wickDepthLow >= atrV * minWickAtr
+wickOkHigh = wickDepthHigh >= atrV * minWickAtr
+volOk = not useVol or volume > volMA * volMult
+
+bullSweep = low < recentLow and close > recentLow and close > midBar and wickOkLow and volOk
+bearSweep = high > recentHigh and close < recentHigh and close < midBar and wickOkHigh and volOk
 
 trendUp = emaF > emaS
 trendDown = emaF < emaS
@@ -95,6 +133,9 @@ plotshape(sweepSell, "Sweep SELL", style=shape.labeldown, location=location.abov
 // Mark the swept level so you can see which liquidity was taken
 plot(sweepBuy ? recentLow : na, "Swept low", style=plot.style_circles, color=color.new(color.teal, 0), linewidth=3)
 plot(sweepSell ? recentHigh : na, "Swept high", style=plot.style_circles, color=color.new(color.maroon, 0), linewidth=3)
+
+// Background tint when the ADX filter says the market is chop (no-trade zone)
+bgcolor(useAdx and adxV < adxMin ? color.new(color.gray, 92) : na, title="Chop zone")
 
 // ── Alerts (set trigger to "Once Per Bar Close") ─────────────────────────────
 alertcondition(buySignal, "Trend BUY", "BUY signal on {{ticker}} ({{interval}}) @ {{close}}")
