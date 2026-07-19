@@ -1,0 +1,106 @@
+//@version=5
+// Gold Scalper — Buy/Sell Signals + Liquidity Sweeps
+// Companion indicator to the MT5 Telegram bot: same EMA-stack / RSI / MACD
+// voting logic, plus liquidity-sweep detection that fires on the sweep candle.
+//
+// Signals:
+//   BUY / SELL       — score-based trend signal (5 of 6 conditions)
+//   SWEEP BUY        — price wicks BELOW a recent low (grabs sell-side liquidity)
+//                      then closes back above it → immediate long signal
+//   SWEEP SELL       — price wicks ABOVE a recent high (grabs buy-side liquidity)
+//                      then closes back below it → immediate short signal
+//
+// Set alerts with trigger "Once Per Bar Close" to avoid repainting.
+
+indicator("Gold Scalper — Signals + Liquidity Sweeps", overlay=true, max_labels_count=500)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+emaFastLen = input.int(20,  "EMA fast",  minval=1, group="Trend")
+emaSlowLen = input.int(50,  "EMA slow",  minval=1, group="Trend")
+ema100Len  = input.int(100, "EMA 100",   minval=1, group="Trend")
+sma200Len  = input.int(200, "SMA 200",   minval=1, group="Trend")
+
+rsiLen     = input.int(14, "RSI length", minval=1, group="Momentum")
+rsiBuyMin  = input.int(40, "RSI buy min",  group="Momentum")
+rsiBuyMax  = input.int(75, "RSI buy max",  group="Momentum")
+rsiSellMin = input.int(25, "RSI sell min", group="Momentum")
+rsiSellMax = input.int(60, "RSI sell max", group="Momentum")
+
+sweepLook  = input.int(20, "Sweep lookback (bars)", minval=3, group="Liquidity Sweep",
+     tooltip="A sweep = wick beyond the highest high / lowest low of this many previous bars, with a close back inside")
+sweepTrendFilter = input.bool(false, "Sweep must agree with EMA trend", group="Liquidity Sweep",
+     tooltip="OFF = take sweeps as reversal signals (default). ON = only sweeps in the direction of EMA20 vs EMA50")
+
+cooldown   = input.int(5, "Min bars between same-side trend signals", minval=0, group="Signals")
+
+// ── Indicators ────────────────────────────────────────────────────────────────
+emaF = ta.ema(close, emaFastLen)
+emaS = ta.ema(close, emaSlowLen)
+ema1 = ta.ema(close, ema100Len)
+sma2 = ta.sma(close, sma200Len)
+rsiV = ta.rsi(close, rsiLen)
+[macdLine, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+
+// ── Score-based BUY/SELL (mirrors the MT5 bot: needs 5 of 6) ─────────────────
+buyScore = (emaF > emaS ? 1 : 0) +
+           (emaS > ema1 ? 1 : 0) +
+           (close > sma2 ? 1 : 0) +
+           (rsiV > rsiBuyMin and rsiV < rsiBuyMax ? 1 : 0) +
+           (macdHist > 0 ? 1 : 0) +
+           (close > emaF ? 1 : 0)
+
+sellScore = (emaF < emaS ? 1 : 0) +
+            (emaS < ema1 ? 1 : 0) +
+            (close < sma2 ? 1 : 0) +
+            (rsiV > rsiSellMin and rsiV < rsiSellMax ? 1 : 0) +
+            (macdHist < 0 ? 1 : 0) +
+            (close < emaF ? 1 : 0)
+
+buyRaw  = buyScore  >= 5
+sellRaw = sellScore >= 5
+
+var int lastBuyBar  = -99999
+var int lastSellBar = -99999
+buySignal  = buyRaw  and (bar_index - lastBuyBar  >= cooldown) and not buyRaw[1]
+sellSignal = sellRaw and (bar_index - lastSellBar >= cooldown) and not sellRaw[1]
+if buySignal
+    lastBuyBar := bar_index
+if sellSignal
+    lastSellBar := bar_index
+
+// ── Liquidity sweep detection ─────────────────────────────────────────────────
+// Reference levels: the extreme of the PREVIOUS `sweepLook` bars (current bar excluded)
+recentLow  = ta.lowest(low[1],   sweepLook)
+recentHigh = ta.highest(high[1], sweepLook)
+
+// Bullish sweep: wick takes out the low, candle closes back above it AND in its upper half
+bullSweep = low < recentLow and close > recentLow and close > (high + low) / 2
+// Bearish sweep: wick takes out the high, candle closes back below it AND in its lower half
+bearSweep = high > recentHigh and close < recentHigh and close < (high + low) / 2
+
+trendUp   = emaF > emaS
+trendDown = emaF < emaS
+sweepBuy  = bullSweep and (not sweepTrendFilter or trendUp)
+sweepSell = bearSweep and (not sweepTrendFilter or trendDown)
+
+// ── Plots ─────────────────────────────────────────────────────────────────────
+plot(emaF, "EMA fast", color=color.new(color.blue, 0))
+plot(emaS, "EMA slow", color=color.new(color.orange, 0))
+plot(sma2, "SMA 200",  color=color.new(color.gray, 40), linewidth=2)
+
+plotshape(buySignal,  "BUY",  shape.triangleup,   location.belowbar, color.new(color.green, 0), text="BUY",  textcolor=color.green, size=size.small)
+plotshape(sellSignal, "SELL", shape.triangledown, location.abovebar, color.new(color.red, 0),   text="SELL", textcolor=color.red,   size=size.small)
+
+plotshape(sweepBuy,  "Sweep BUY",  shape.labelup,   location.belowbar, color.new(color.teal, 0),   text="SWEEP\nBUY",  textcolor=color.white, size=size.small)
+plotshape(sweepSell, "Sweep SELL", shape.labeldown, location.abovebar, color.new(color.maroon, 0), text="SWEEP\nSELL", textcolor=color.white, size=size.small)
+
+// Mark the swept level so you can see which liquidity was taken
+plot(sweepBuy  ? recentLow  : na, "Swept low",  style=plot.style_circles, color=color.teal,   linewidth=3)
+plot(sweepSell ? recentHigh : na, "Swept high", style=plot.style_circles, color=color.maroon, linewidth=3)
+
+// ── Alerts (set trigger to "Once Per Bar Close") ─────────────────────────────
+alertcondition(buySignal,  "Trend BUY",           "BUY signal on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(sellSignal, "Trend SELL",          "SELL signal on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(sweepBuy,   "Liquidity Sweep BUY", "SWEEP BUY on {{ticker}} ({{interval}}) — sell-side liquidity grabbed @ {{close}}")
+alertcondition(sweepSell,  "Liquidity Sweep SELL","SWEEP SELL on {{ticker}} ({{interval}}) — buy-side liquidity grabbed @ {{close}}")
+alertcondition(sweepBuy or sweepSell or buySignal or sellSignal, "Any signal", "Signal on {{ticker}} ({{interval}}) @ {{close}}")
