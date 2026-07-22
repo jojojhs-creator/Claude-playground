@@ -279,6 +279,22 @@ class TradingEngine:
                         logger.error("Quick-profit exit failed for ticket %d: %s", p.ticket, e)
                     continue
 
+                # Hard loss cap: close immediately if loss reaches the cap
+                if self._config.max_loss_usd > 0 and p.profit <= -self._config.max_loss_usd:
+                    logger.info("Ticket %d (%s) hit max-loss -$%.2f — closing (P/L %.2f)",
+                                p.ticket, p.symbol, self._config.max_loss_usd, p.profit)
+                    try:
+                        await self._mt5(self._connector.close_position, p.ticket)
+                        self._position_open_times.pop(p.ticket, None)
+                        if self._tg_bot:
+                            await self._tg_bot.send_message_to_all(
+                                f"🛑 *Stop-out: {p.symbol}*\n"
+                                f"Ticket `{p.ticket}` closed at `{p.profit:+.2f}` (loss cap)"
+                            )
+                    except Exception as e:
+                        logger.error("Max-loss exit failed for ticket %d: %s", p.ticket, e)
+                    continue
+
                 # Time-based exit: close bot trades that exceeded max age
                 if max_age_seconds > 0:
                     opened = self._position_open_times.get(p.ticket)

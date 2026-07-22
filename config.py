@@ -74,6 +74,7 @@ class AppConfig:
     quick_profit_usd: float = 0.0       # close a trade the moment it is up this many $ (0 = off)
     quick_profit_percent: float = 0.0   # close a trade the moment profit ≥ this % of equity (0 = off)
     max_trade_age_seconds: int = 0      # close bot trades older than this many seconds (0 = off)
+    max_loss_usd: float = 0.0           # hard-close a trade if its loss reaches this many $ (0 = off)
 
 
 def _require(key: str) -> str:
@@ -195,4 +196,5 @@ def load_config(env_file: str = ".env") -> AppConfig:
         quick_profit_usd=_float("QUICK_PROFIT_USD", 5.0 if turbo_mode else 0.0),
         quick_profit_percent=_float("QUICK_PROFIT_PERCENT", 0.0),
         max_trade_age_seconds=_int("MAX_TRADE_AGE_SECONDS", 120 if turbo_mode else 0),
+        max_loss_usd=_float("MAX_LOSS_USD", 0.0),
     )
