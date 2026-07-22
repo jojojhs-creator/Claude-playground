@@ -75,6 +75,9 @@ class AppConfig:
     quick_profit_percent: float = 0.0   # close a trade the moment profit ≥ this % of equity (0 = off)
     max_trade_age_seconds: int = 0      # close bot trades older than this many seconds (0 = off)
     max_loss_usd: float = 0.0           # hard-close a trade if its loss reaches this many $ (0 = off)
+    balanced_mode: bool = False         # True → H1/M15/M5 timeframes, M5 trigger (quick but not noisy)
+    trade_start_hour: int = 0           # only open new trades from this UTC hour (inclusive)
+    trade_end_hour: int = 24            # ...until this UTC hour (exclusive); 0/24 = always on
 
 
 def _require(key: str) -> str:
@@ -149,6 +152,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
 
     scalp_mode = os.getenv("SCALP_MODE", "false").strip().lower() in ("1", "true", "yes")
     turbo_mode = os.getenv("TURBO_MODE", "false").strip().lower() in ("1", "true", "yes")
+    balanced_mode = os.getenv("BALANCED_MODE", "false").strip().lower() in ("1", "true", "yes")
 
     return AppConfig(
         mt5=MT5Config(
@@ -165,7 +169,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
             max_risk_percent=max_risk,
             sl_atr_multiplier=_float("SL_ATR_MULTIPLIER", 0.5),
             rr_ratio=_float("RR_RATIO", 3.0),
-            min_adx=_float("MIN_ADX", 15.0 if (scalp_mode or turbo_mode) else 0.0),
+            min_adx=_float("MIN_ADX", 22.0 if balanced_mode else (15.0 if (scalp_mode or turbo_mode) else 0.0)),
             signal_threshold=_int("SIGNAL_THRESHOLD", 4 if (scalp_mode or turbo_mode) else 5),
             require_momentum=os.getenv("REQUIRE_MOMENTUM", "true").strip().lower() in ("1", "true", "yes"),
         ),
@@ -188,8 +192,8 @@ def load_config(env_file: str = ".env") -> AppConfig:
         log_file=os.getenv("LOG_FILE", "logs/trading_bot.log").strip() or "logs/trading_bot.log",
         fixed_lots=fixed_lots,
         scalp_mode=scalp_mode,
-        scan_interval_seconds=_int("SCAN_INTERVAL_SECONDS", 5 if turbo_mode else (60 if scalp_mode else 300)),
-        max_positions_per_symbol=_int("MAX_POSITIONS_PER_SYMBOL", 3 if (scalp_mode or turbo_mode) else 1),
+        scan_interval_seconds=_int("SCAN_INTERVAL_SECONDS", 5 if turbo_mode else (30 if balanced_mode else (60 if scalp_mode else 300))),
+        max_positions_per_symbol=_int("MAX_POSITIONS_PER_SYMBOL", 1 if balanced_mode else (3 if (scalp_mode or turbo_mode) else 1)),
         max_trade_age_minutes=_int("MAX_TRADE_AGE_MINUTES", 15 if scalp_mode else 0),
         turbo_mode=turbo_mode,
         monitor_interval_seconds=_int("MONITOR_INTERVAL_SECONDS", 5 if turbo_mode else 30),
@@ -197,4 +201,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
         quick_profit_percent=_float("QUICK_PROFIT_PERCENT", 0.0),
         max_trade_age_seconds=_int("MAX_TRADE_AGE_SECONDS", 120 if turbo_mode else 0),
         max_loss_usd=_float("MAX_LOSS_USD", 0.0),
+        balanced_mode=balanced_mode,
+        trade_start_hour=_int("TRADE_START_HOUR", 0),
+        trade_end_hour=_int("TRADE_END_HOUR", 24),
     )

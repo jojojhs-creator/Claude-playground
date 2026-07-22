@@ -87,10 +87,34 @@ class TradingEngine:
         async with self._mt5_lock:
             return await asyncio.to_thread(fn, *args, **kwargs)
 
+    def _within_trading_hours(self) -> bool:
+        """True if the current UTC hour is inside the configured trading window."""
+        start = self._config.trade_start_hour
+        end = self._config.trade_end_hour
+        if start == end or (start == 0 and end >= 24):
+            return True  # always on
+        hour = datetime.utcnow().hour
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end  # window wraps past midnight
+
     # ── Core analysis ────────────────────────────────────────────────────────
 
     async def analyze_symbol(self, symbol: str) -> AnalysisResult:
         """Fetch 4 timeframes and run multi-timeframe analysis."""
+        if self._config.balanced_mode:
+            # Balanced scalp: H1 macro trend, M15 intermediate, M5 trigger.
+            # Quick trades (M5 bars) but on a timeframe where the move dwarfs the spread.
+            tf_h1 = mt5.TIMEFRAME_H1 if mt5 else 16385
+            tf_m15 = mt5.TIMEFRAME_M15 if mt5 else 15
+            tf_m5 = mt5.TIMEFRAME_M5 if mt5 else 5
+
+            df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_h1, 300)
+            df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 300)
+            df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, 300)
+            return self.analyzer.analyze(symbol, df_macro, df_mid, df_mid, df_trigger,
+                                         use_forming_bar=False)
+
         if self._config.scalp_mode:
             # Scalp mode: M15 macro trend, M5 intermediate, M1 trigger.
             # The analyzer slots are timeframe-agnostic, so we feed faster charts
@@ -180,6 +204,11 @@ class TradingEngine:
 
         if not self.trading_enabled:
             logger.info("Trading is paused — skipping cycle")
+            return
+
+        if not self._within_trading_hours():
+            logger.info("Outside trading hours (%02d:00–%02d:00 UTC) — no new trades",
+                        self._config.trade_start_hour, self._config.trade_end_hour)
             return
 
         # Verify MT5 connection
@@ -430,7 +459,16 @@ async def main() -> None:
         await application.updater.start_polling(drop_pending_updates=True)
 
         # Send startup notification
-        if config.turbo_mode:
+        if config.balanced_mode:
+            if config.trade_start_hour == 0 and config.trade_end_hour >= 24:
+                hours = "all day"
+            else:
+                hours = f"{config.trade_start_hour:02d}:00–{config.trade_end_hour:02d}:00 UTC"
+            mode_line = (
+                f"⚖️ BALANCED: M5 trigger (H1/M15 trend), ADX≥{config.risk.min_adx:.0f}, "
+                f"1 trade/symbol, hours: {hours}\n"
+            )
+        elif config.turbo_mode:
             mode_line = (
                 f"🔥 TURBO: live-bar entries, quick-profit ${config.quick_profit_usd:.0f}, "
                 f"time exit {config.max_trade_age_seconds}s, max {config.max_positions_per_symbol} trades\n"
