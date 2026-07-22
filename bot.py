@@ -253,6 +253,13 @@ class TradingEngine:
                 max_age_seconds = self._config.max_trade_age_minutes * 60
 
             quick_profit = self._config.quick_profit_usd
+            # Percentage-of-equity target overrides the fixed $ target when set
+            if self._config.quick_profit_percent > 0 and current_positions:
+                try:
+                    acct = await self._mt5(self._connector.get_account_info)
+                    quick_profit = acct.equity * self._config.quick_profit_percent / 100
+                except Exception as e:
+                    logger.error("Could not fetch equity for %%-profit target: %s", e)
             now = datetime.utcnow()
 
             for p in current_positions:

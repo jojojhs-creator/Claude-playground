@@ -72,6 +72,7 @@ class AppConfig:
     turbo_mode: bool = False            # True → enter on the live forming bar (react in seconds)
     monitor_interval_seconds: int = 30  # how often open trades are checked for exits
     quick_profit_usd: float = 0.0       # close a trade the moment it is up this many $ (0 = off)
+    quick_profit_percent: float = 0.0   # close a trade the moment profit ≥ this % of equity (0 = off)
     max_trade_age_seconds: int = 0      # close bot trades older than this many seconds (0 = off)
 
 
@@ -192,5 +193,6 @@ def load_config(env_file: str = ".env") -> AppConfig:
         turbo_mode=turbo_mode,
         monitor_interval_seconds=_int("MONITOR_INTERVAL_SECONDS", 5 if turbo_mode else 30),
         quick_profit_usd=_float("QUICK_PROFIT_USD", 5.0 if turbo_mode else 0.0),
+        quick_profit_percent=_float("QUICK_PROFIT_PERCENT", 0.0),
         max_trade_age_seconds=_int("MAX_TRADE_AGE_SECONDS", 120 if turbo_mode else 0),
     )
