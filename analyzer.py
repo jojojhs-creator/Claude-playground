@@ -73,6 +73,7 @@ class TechnicalAnalyzer:
         df_h4: pd.DataFrame,
         df_h1: pd.DataFrame,
         df_m15: pd.DataFrame,
+        use_forming_bar: bool = False,
     ) -> AnalysisResult:
         """
         Multi-timeframe analysis.
@@ -80,17 +81,21 @@ class TechnicalAnalyzer:
         H4: intermediate trend + S/R detection
         H1: entry timing confirmation
         M15: signal trigger
+
+        use_forming_bar=True (turbo): read the live, still-forming bar (iloc[-1])
+        so signals react within seconds. Faster, but repaints / more false signals.
+        Default False uses the last COMPLETED bar (iloc[-2]) — reliable, no repaint.
         """
         df_d1 = self._compute_indicators(df_d1)
         df_h4 = self._compute_indicators(df_h4)
         df_h1 = self._compute_indicators(df_h1)
         df_m15 = self._compute_indicators(df_m15)
 
-        # Use last COMPLETED bar (iloc[-2]) on each timeframe
-        d1 = df_d1.iloc[-2]
-        h4 = df_h4.iloc[-2]
-        h1 = df_h1.iloc[-2]
-        m15 = df_m15.iloc[-2]
+        idx = -1 if use_forming_bar else -2
+        d1 = df_d1.iloc[idx]
+        h4 = df_h4.iloc[idx]
+        h1 = df_h1.iloc[idx]
+        m15 = df_m15.iloc[idx]
 
         close = float(m15["close"])
         atr = float(m15.get("atr", h1.get("atr", 0)))

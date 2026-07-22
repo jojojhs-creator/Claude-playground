@@ -66,6 +66,10 @@ class AppConfig:
     scan_interval_seconds: int = 300    # how often the scan cycle runs
     max_positions_per_symbol: int = 1   # concurrent positions allowed per symbol
     max_trade_age_minutes: int = 0      # close bot trades older than this (0 = disabled)
+    turbo_mode: bool = False            # True → enter on the live forming bar (react in seconds)
+    monitor_interval_seconds: int = 30  # how often open trades are checked for exits
+    quick_profit_usd: float = 0.0       # close a trade the moment it is up this many $ (0 = off)
+    max_trade_age_seconds: int = 0      # close bot trades older than this many seconds (0 = off)
 
 
 def _require(key: str) -> str:
@@ -139,6 +143,7 @@ def load_config(env_file: str = ".env") -> AppConfig:
                 raise ConfigError(f"{sym}_LOT must be a float, got: {lot_raw!r}")
 
     scalp_mode = os.getenv("SCALP_MODE", "false").strip().lower() in ("1", "true", "yes")
+    turbo_mode = os.getenv("TURBO_MODE", "false").strip().lower() in ("1", "true", "yes")
 
     return AppConfig(
         mt5=MT5Config(
@@ -175,7 +180,11 @@ def load_config(env_file: str = ".env") -> AppConfig:
         log_file=os.getenv("LOG_FILE", "logs/trading_bot.log").strip() or "logs/trading_bot.log",
         fixed_lots=fixed_lots,
         scalp_mode=scalp_mode,
-        scan_interval_seconds=_int("SCAN_INTERVAL_SECONDS", 60 if scalp_mode else 300),
-        max_positions_per_symbol=_int("MAX_POSITIONS_PER_SYMBOL", 3 if scalp_mode else 1),
+        scan_interval_seconds=_int("SCAN_INTERVAL_SECONDS", 5 if turbo_mode else (60 if scalp_mode else 300)),
+        max_positions_per_symbol=_int("MAX_POSITIONS_PER_SYMBOL", 3 if (scalp_mode or turbo_mode) else 1),
         max_trade_age_minutes=_int("MAX_TRADE_AGE_MINUTES", 15 if scalp_mode else 0),
+        turbo_mode=turbo_mode,
+        monitor_interval_seconds=_int("MONITOR_INTERVAL_SECONDS", 5 if turbo_mode else 30),
+        quick_profit_usd=_float("QUICK_PROFIT_USD", 5.0 if turbo_mode else 0.0),
+        max_trade_age_seconds=_int("MAX_TRADE_AGE_SECONDS", 120 if turbo_mode else 0),
     )

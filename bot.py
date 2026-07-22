@@ -102,7 +102,8 @@ class TradingEngine:
             df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 300)
             df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, 300)
             df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m1, 300)
-            return self.analyzer.analyze(symbol, df_macro, df_mid, df_mid, df_trigger)
+            return self.analyzer.analyze(symbol, df_macro, df_mid, df_mid, df_trigger,
+                                         use_forming_bar=self._config.turbo_mode)
 
         tf_d1 = mt5.TIMEFRAME_D1 if mt5 else 16408
         tf_h4 = mt5.TIMEFRAME_H4 if mt5 else 16388
@@ -114,7 +115,8 @@ class TradingEngine:
         df_h1 = await self._mt5(self._connector.get_ohlcv, symbol, tf_h1, 200)
         df_m15 = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 200)
 
-        return self.analyzer.analyze(symbol, df_d1, df_h4, df_h1, df_m15)
+        return self.analyzer.analyze(symbol, df_d1, df_h4, df_h1, df_m15,
+                                     use_forming_bar=self._config.turbo_mode)
 
     # ── Trade execution ──────────────────────────────────────────────────────
 
@@ -245,22 +247,44 @@ class TradingEngine:
             current_positions = await self._mt5(self._connector.get_open_positions)
             current_tickets = {p.ticket for p in current_positions}
 
-            # Time-based exit: close bot trades that exceeded max age (scalp mode)
-            if self._config.max_trade_age_minutes > 0:
-                now = datetime.utcnow()
-                max_age = timedelta(minutes=self._config.max_trade_age_minutes)
-                for p in current_positions:
+            # Effective max age in seconds (seconds setting wins if set, else minutes)
+            max_age_seconds = self._config.max_trade_age_seconds
+            if max_age_seconds <= 0 and self._config.max_trade_age_minutes > 0:
+                max_age_seconds = self._config.max_trade_age_minutes * 60
+
+            quick_profit = self._config.quick_profit_usd
+            now = datetime.utcnow()
+
+            for p in current_positions:
+                # Quick-profit exit: grab profit the moment it appears (turbo)
+                if quick_profit > 0 and p.profit >= quick_profit:
+                    logger.info("Ticket %d (%s) hit quick-profit $%.2f — closing (P/L %.2f)",
+                                p.ticket, p.symbol, quick_profit, p.profit)
+                    try:
+                        await self._mt5(self._connector.close_position, p.ticket)
+                        self._position_open_times.pop(p.ticket, None)
+                        if self._tg_bot:
+                            await self._tg_bot.send_message_to_all(
+                                f"💰 *Quick profit: {p.symbol}*\n"
+                                f"Ticket `{p.ticket}` closed at `{p.profit:+.2f}`"
+                            )
+                    except Exception as e:
+                        logger.error("Quick-profit exit failed for ticket %d: %s", p.ticket, e)
+                    continue
+
+                # Time-based exit: close bot trades that exceeded max age
+                if max_age_seconds > 0:
                     opened = self._position_open_times.get(p.ticket)
-                    if opened and (now - opened) > max_age:
-                        logger.info("Ticket %d (%s) older than %d min — time exit (P/L %.2f)",
-                                    p.ticket, p.symbol, self._config.max_trade_age_minutes, p.profit)
+                    if opened and (now - opened) > timedelta(seconds=max_age_seconds):
+                        logger.info("Ticket %d (%s) older than %ds — time exit (P/L %.2f)",
+                                    p.ticket, p.symbol, max_age_seconds, p.profit)
                         try:
                             await self._mt5(self._connector.close_position, p.ticket)
                             self._position_open_times.pop(p.ticket, None)
                             if self._tg_bot:
                                 await self._tg_bot.send_message_to_all(
                                     f"⏱ *Time exit: {p.symbol}*\n"
-                                    f"Ticket `{p.ticket}` held > {self._config.max_trade_age_minutes} min\n"
+                                    f"Ticket `{p.ticket}` held > {max_age_seconds}s\n"
                                     f"P/L: `{p.profit:+.2f}`"
                                 )
                         except Exception as e:
@@ -350,17 +374,18 @@ async def main() -> None:
         coalesce=True,
         max_instances=1,
     )
+    monitor_seconds = config.monitor_interval_seconds
     scheduler.add_job(
         engine.monitor_closed_positions,
-        trigger=IntervalTrigger(seconds=30),
+        trigger=IntervalTrigger(seconds=monitor_seconds),
         id="position_monitor",
         name="Position closed monitor",
-        misfire_grace_time=30,
+        misfire_grace_time=min(30, monitor_seconds),
         coalesce=True,
         max_instances=1,
     )
     scheduler.start()
-    logger.info("Scheduler started: scan every %ds, monitor every 30 sec", scan_seconds)
+    logger.info("Scheduler started: scan every %ds, monitor every %ds", scan_seconds, monitor_seconds)
 
     # Shutdown handler
     stop_event = asyncio.Event()
@@ -382,11 +407,18 @@ async def main() -> None:
         await application.updater.start_polling(drop_pending_updates=True)
 
         # Send startup notification
-        mode_line = (
-            f"⚡ Scalp mode: M1 trigger, max {config.max_positions_per_symbol} trades/symbol, "
-            f"time exit {config.max_trade_age_minutes} min\n"
-            if config.scalp_mode else ""
-        )
+        if config.turbo_mode:
+            mode_line = (
+                f"🔥 TURBO: live-bar entries, quick-profit ${config.quick_profit_usd:.0f}, "
+                f"time exit {config.max_trade_age_seconds}s, max {config.max_positions_per_symbol} trades\n"
+            )
+        elif config.scalp_mode:
+            mode_line = (
+                f"⚡ Scalp mode: M1 trigger, max {config.max_positions_per_symbol} trades/symbol, "
+                f"time exit {config.max_trade_age_minutes} min\n"
+            )
+        else:
+            mode_line = ""
         await tg_bot.send_message_to_all(
             f"🚀 *MT5 Bot started*\n"
             f"Symbols: `{', '.join(config.symbols)}`\n"
