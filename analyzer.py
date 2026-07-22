@@ -238,7 +238,17 @@ class TechnicalAnalyzer:
             and abs(close - nearest_support) / close < 0.003
         )
 
-        # BUY conditions (need 5 out of 7)
+        # Trend strength on the trigger timeframe (for the chop filter)
+        m15_adx = _val(m15, "adx", 0.0)
+        min_adx = self._risk.min_adx
+        threshold = self._risk.signal_threshold
+        require_mom = self._risk.require_momentum
+
+        # Chop filter: no trend → no trade (avoids coin-flip losses)
+        if min_adx > 0 and m15_adx < min_adx:
+            return Signal.HOLD, f"HOLD — no trend (ADX {m15_adx:.1f} < {min_adx:.0f}), skipping chop"
+
+        # BUY conditions (need `threshold` out of 7)
         buy_conditions = [
             d1_bullish,
             h4_bullish,
@@ -249,7 +259,7 @@ class TechnicalAnalyzer:
             not at_resistance,
         ]
 
-        # SELL conditions (need 5 out of 7)
+        # SELL conditions (need `threshold` out of 7)
         sell_conditions = [
             d1_bearish,
             h4_bearish,
@@ -263,26 +273,32 @@ class TechnicalAnalyzer:
         buy_score = sum(1 for c in buy_conditions if c)
         sell_score = sum(1 for c in sell_conditions if c)
 
-        SIGNAL_THRESHOLD = 5  # out of 7 conditions required
+        # Momentum gate: never trade against MACD direction (kills counter-momentum trades)
+        buy_mom_ok = (not require_mom) or (m15_macd_hist > 0)
+        sell_mom_ok = (not require_mom) or (m15_macd_hist < 0)
 
-        if buy_score >= SIGNAL_THRESHOLD:
+        if buy_score >= threshold and buy_mom_ok:
             rationale = (
-                f"BUY signal — D1/H4 bullish, M15 MA stack bullish, "
-                f"RSI={m15_rsi:.1f}, MACD hist={m15_macd_hist:.4f}, "
-                f"price above SMA200"
+                f"BUY signal ({buy_score}/7) — D1/H4 bullish, ADX={m15_adx:.1f}, "
+                f"RSI={m15_rsi:.1f}, MACD hist={m15_macd_hist:.4f}"
             )
             return Signal.BUY, rationale
 
-        if sell_score >= SIGNAL_THRESHOLD:
+        if sell_score >= threshold and sell_mom_ok:
             rationale = (
-                f"SELL signal — D1/H4 bearish, M15 MA stack bearish, "
-                f"RSI={m15_rsi:.1f}, MACD hist={m15_macd_hist:.4f}, "
-                f"price below SMA200"
+                f"SELL signal ({sell_score}/7) — D1/H4 bearish, ADX={m15_adx:.1f}, "
+                f"RSI={m15_rsi:.1f}, MACD hist={m15_macd_hist:.4f}"
             )
             return Signal.SELL, rationale
 
+        # Setup was strong enough but momentum disagreed — explain the skip
+        if buy_score >= threshold and not buy_mom_ok:
+            return Signal.HOLD, f"BUY setup ({buy_score}/7) but momentum down (MACD {m15_macd_hist:.4f}) — skipped"
+        if sell_score >= threshold and not sell_mom_ok:
+            return Signal.HOLD, f"SELL setup ({sell_score}/7) but momentum up (MACD {m15_macd_hist:.4f}) — skipped"
+
         # Partial match — log why we're holding
-        if buy_score >= 5:
+        if buy_score >= threshold - 1:
             missing = [
                 "D1 bullish" if not d1_bullish else None,
                 "H4 bullish" if not h4_bullish else None,
@@ -294,7 +310,7 @@ class TechnicalAnalyzer:
             ]
             missing_str = ", ".join(m for m in missing if m)
             rationale = f"Near BUY ({buy_score}/7) — missing: {missing_str}"
-        elif sell_score >= 5:
+        elif sell_score >= threshold - 1:
             missing = [
                 "D1 bearish" if not d1_bearish else None,
                 "H4 bearish" if not h4_bearish else None,

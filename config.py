@@ -34,6 +34,9 @@ class RiskConfig:
     max_risk_percent: float
     sl_atr_multiplier: float   # fraction of ATR used for SL distance (e.g. 0.5 for scalping)
     rr_ratio: float            # TP = SL distance × rr_ratio (e.g. 3.0 for 1:3)
+    min_adx: float = 0.0       # skip trades when ADX below this (0 = off) — chop filter
+    signal_threshold: int = 5  # how many of 7 conditions required to fire a signal
+    require_momentum: bool = True  # MACD must agree with trade direction (no counter-momentum trades)
 
 
 @dataclass
@@ -160,6 +163,9 @@ def load_config(env_file: str = ".env") -> AppConfig:
             max_risk_percent=max_risk,
             sl_atr_multiplier=_float("SL_ATR_MULTIPLIER", 0.5),
             rr_ratio=_float("RR_RATIO", 3.0),
+            min_adx=_float("MIN_ADX", 15.0 if (scalp_mode or turbo_mode) else 0.0),
+            signal_threshold=_int("SIGNAL_THRESHOLD", 4 if (scalp_mode or turbo_mode) else 5),
+            require_momentum=os.getenv("REQUIRE_MOMENTUM", "true").strip().lower() in ("1", "true", "yes"),
         ),
         indicators=IndicatorConfig(
             ema_fast=_int("EMA_FAST", 20),
