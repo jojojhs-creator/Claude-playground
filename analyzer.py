@@ -38,6 +38,16 @@ class SRLevels:
 
 
 @dataclass
+class ConditionScores:
+    """Raw signal tally before any threshold or filter is applied."""
+    buy_score: int
+    sell_score: int
+    adx: float
+    macd_hist: float
+    rsi: float
+
+
+@dataclass
 class AnalysisResult:
     symbol: str
     timestamp: datetime
@@ -187,6 +197,54 @@ class TechnicalAnalyzer:
 
         return df
 
+    def score_conditions(
+        self,
+        d1, h4, h1, m15,
+        close: float,
+        nearest_support: float | None,
+        nearest_resistance: float | None,
+    ) -> ConditionScores:
+        """
+        Raw condition tally, independent of any threshold/filter setting.
+        Split out so a parameter sweep can compute these once per bar and then
+        test many threshold/ADX/momentum combinations against them cheaply.
+        """
+        def _val(row, key: str, default=0.0):
+            v = row.get(key, default)
+            return default if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
+
+        d1_bullish = _val(d1, "ema20") > _val(d1, "ema50")
+        d1_bearish = _val(d1, "ema20") < _val(d1, "ema50")
+        h4_bullish = _val(h4, "ema20") > _val(h4, "ema50")
+        h4_bearish = _val(h4, "ema20") < _val(h4, "ema50")
+
+        ema20 = _val(m15, "ema20")
+        ema50 = _val(m15, "ema50")
+        ema100 = _val(m15, "ema100")
+        sma200 = _val(m15, "sma200")
+        rsi = _val(m15, "rsi", 50.0)
+        macd_hist = _val(m15, "macd_hist")
+        adx = _val(m15, "adx", 0.0)
+
+        above_sma200 = close > sma200 if sma200 else None
+        at_resistance = (nearest_resistance is not None
+                         and abs(close - nearest_resistance) / close < 0.003)
+        at_support = (nearest_support is not None
+                      and abs(close - nearest_support) / close < 0.003)
+
+        buy = [d1_bullish, h4_bullish, above_sma200 is True,
+               ema20 > ema50 > ema100, 40 < rsi < 75, macd_hist > 0, not at_resistance]
+        sell = [d1_bearish, h4_bearish, above_sma200 is False,
+                ema20 < ema50 < ema100, 25 < rsi < 60, macd_hist < 0, not at_support]
+
+        return ConditionScores(
+            buy_score=sum(1 for c in buy if c),
+            sell_score=sum(1 for c in sell if c),
+            adx=adx,
+            macd_hist=macd_hist,
+            rsi=rsi,
+        )
+
     def _classify_signal(
         self,
         symbol: str,
@@ -248,30 +306,11 @@ class TechnicalAnalyzer:
         if min_adx > 0 and m15_adx < min_adx:
             return Signal.HOLD, f"HOLD — no trend (ADX {m15_adx:.1f} < {min_adx:.0f}), skipping chop"
 
-        # BUY conditions (need `threshold` out of 7)
-        buy_conditions = [
-            d1_bullish,
-            h4_bullish,
-            above_sma200 is True,
-            ma_bull_stack,
-            40 < m15_rsi < 75,
-            m15_macd_hist > 0,
-            not at_resistance,
-        ]
-
-        # SELL conditions (need `threshold` out of 7)
-        sell_conditions = [
-            d1_bearish,
-            h4_bearish,
-            above_sma200 is False,
-            ma_bear_stack,
-            25 < m15_rsi < 60,
-            m15_macd_hist < 0,
-            not at_support,
-        ]
-
-        buy_score = sum(1 for c in buy_conditions if c)
-        sell_score = sum(1 for c in sell_conditions if c)
+        # Single source of truth for the condition tally (shared with the sweep)
+        scores = self.score_conditions(d1, h4, h1, m15, close,
+                                       nearest_support, nearest_resistance)
+        buy_score = scores.buy_score
+        sell_score = scores.sell_score
 
         # Momentum gate: never trade against MACD direction (kills counter-momentum trades)
         buy_mom_ok = (not require_mom) or (m15_macd_hist > 0)

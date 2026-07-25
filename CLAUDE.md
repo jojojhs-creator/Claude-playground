@@ -16,7 +16,8 @@ Branch: `claude/mt5-telegram-trading-bot-rxcae1`
 | `risk_manager.py` | Lot sizing, SL/TP calculation. |
 | `telegram_bot.py` | Async command handlers + outbound alerts. |
 | `bot.py` | Orchestrator: APScheduler scan cycle + position monitor. |
-| `backtest.py` | Replays current `.env` settings over history. **Use before any live change.** |
+| `backtest.py` | Replays current `.env` settings over history. **Use before any live change.** Also the engine (`load_market`/`simulate`) used by the sweep. |
+| `sweep.py` | Grid search with a 60/40 train/test split. Judge settings by the test column. |
 | `tradingview/*.pine` | Companion TradingView indicator (separate from the bot). |
 
 ## Modes (mutually exclusive, set in `.env`)
@@ -31,16 +32,38 @@ different timeframes into the same `d1/h4/h1/m15` parameters.
 
 ## Measured findings (do not re-guess these)
 
-Backtest, BTCUSD 30d, M5, threshold 4/7, ADX≥18, SL 1.0×ATR, RR 1:2:
+All M5 (`BALANCED_MODE`), 30–44 days, spread charged per trade.
 
-- 976 trades, 33.5% win rate, profit factor 0.82, **net −$1,282**
-- **Spread was 91% of the loss** (976 × $1.20). Pre-spread the edge is ~zero.
-- Trade count is the dominant cost driver. Fewer, higher-quality trades beats
-  more trades at this timeframe.
-- Trailing stop fired 6/976 times — dollar-based `TRAIL_ACTIVATE_USD` does not
-  transfer across symbols/lot sizes. Consider making it ATR-relative.
-- Spreads observed: **BTCUSD ~$12**, XAUUSD ~$0.25. Bitcoin is a poor scalping
-  instrument despite trading 24/7.
+| Run | Result |
+|---|---|
+| BTCUSD, thr 4/7, ADX≥18, SL 1.0×ATR | 976 trades, 33.5% win, PF 0.82, **−$1,282** |
+| BTCUSD, thr 5/7, ADX≥25, SL 1.5×ATR | 426 trades, 51.6% win, PF 0.95, **−$161** |
+| XAUUSD, thr 5/7, ADX≥25, SL 1.5×ATR, no trail | 270 trades, 37.4% win, PF **1.08**, +$2,547 |
+
+- **Spread dominates.** In the first run it was 91% of the loss (976 × $1.20).
+  Trade count is the main cost lever.
+- **XAUUSD PF 1.08 is not tradeable.** Breakeven win rate is 35.6% vs 37.4%
+  actual, and max drawdown ($2,159) nearly equals net profit. Real slippage
+  and variable spread would erase it.
+- Spreads: **BTCUSD ~$12**, XAUUSD ~$0.25–0.30 (weekend ticks read ~$1.00 —
+  always pass an explicit spread when the market is shut).
+- Gold M5 median ATR **$4.67**; at 0.2 lot a 1.5×ATR stop is **$140**.
+
+### Two backtester bugs that produced fake profits — do not reintroduce
+
+1. **Intrabar lookahead in the trailing stop.** Raising the peak from a bar's
+   favourable extreme and then triggering the exit against the same bar's
+   adverse extreme assumes an unknowable intrabar order. It reported 84% win
+   rate, 5-minute holds and **+$25,316** on XAUUSD; the true figure with the
+   trail disabled was +$2,547. The floor must come from the peak as of the
+   previous bar's close.
+2. **O(n²) recomputation.** Calling `analyze()` per bar recomputed every
+   indicator over the whole series. Indicators are backward-looking, so
+   compute once up front.
+
+Dollar-based `TRAIL_ACTIVATE_USD` does not transfer across symbols: at $12 it
+arms after a $0.60 move on XAUUSD 0.2 lot (inside bar noise) but needs a $120
+move on BTCUSD 0.1 lot. Make it ATR-relative if it is revived.
 
 Earlier live lesson: setting both `MAX_LOSS_USD` and an ATR stop makes the
 tighter one always win, silently breaking the intended risk:reward. Use one
