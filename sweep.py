@@ -41,10 +41,14 @@ def main(symbol: str, days: int, spread: float | None) -> None:
     md = load_market(symbol, days, spread, cfg)
 
     n = len(md.close)
-    split = WARMUP + int((n - WARMUP) * 0.60)
+    start = md.first_valid          # bars before this have no usable context
+    if start >= n:
+        print("No usable bars — nothing to sweep.")
+        return
+    split = start + int((n - start) * 0.60)
     combos = list(itertools.product(THRESHOLDS, MIN_ADX, SL_MULTS, RR_RATIOS))
 
-    print(f"\nTrain bars {WARMUP}–{split} | Test bars {split}–{n}")
+    print(f"\nTrain bars {start}–{split} | Test bars {split}–{n}")
     print(f"Testing {len(combos)} combinations…\n")
 
     rows = []
@@ -53,7 +57,7 @@ def main(symbol: str, days: int, spread: float | None) -> None:
             print(f"  …{k}/{len(combos)}")
         p = Params(signal_threshold=thr, min_adx=adx, require_momentum=True,
                    sl_atr_mult=slm, rr_ratio=rr)
-        tr = stats(simulate(md, p, WARMUP, split))
+        tr = stats(simulate(md, p, start, split))
         te = stats(simulate(md, p, split, n))
         if tr["trades"] < MIN_TRADES_PER_HALF or te["trades"] < MIN_TRADES_PER_HALF:
             continue

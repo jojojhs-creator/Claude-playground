@@ -107,15 +107,16 @@ class MarketData:
     macd_hist: np.ndarray
     median_atr: float
     median_range: float
+    first_valid: int          # first bar with usable higher-timeframe context
 
 
-def _tf_constants(cfg: AppConfig) -> tuple[int, int, int, int]:
-    """(macro, mid, trigger, trigger_minutes) matching the bot's active mode."""
+def _tf_constants(cfg: AppConfig) -> tuple[int, int, int, int, int, int]:
+    """(macro, mid, trigger, macro_min, mid_min, trigger_min) for the active mode."""
     if cfg.balanced_mode:
-        return mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M5, 5
+        return mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M5, 60, 15, 5
     if cfg.scalp_mode or cfg.turbo_mode:
-        return mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M1, 1
-    return mt5.TIMEFRAME_D1, mt5.TIMEFRAME_H4, mt5.TIMEFRAME_M15, 15
+        return mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M1, 15, 5, 1
+    return mt5.TIMEFRAME_D1, mt5.TIMEFRAME_H4, mt5.TIMEFRAME_M15, 1440, 240, 15
 
 
 def load_market(symbol: str, days: int, spread_override: float | None,
@@ -124,14 +125,22 @@ def load_market(symbol: str, days: int, spread_override: float | None,
     connector = MT5Connector(cfg.mt5)
     connector.connect()
 
-    tf_macro, tf_mid, tf_trigger, tf_minutes = _tf_constants(cfg)
-    bars_needed = int(days * 24 * 60 / tf_minutes) + 300
+    tf_macro, tf_mid, tf_trigger, macro_min, mid_min, tf_minutes = _tf_constants(cfg)
+
+    # Every timeframe must span the requested period, plus WARMUP bars of its
+    # own history. Under-fetching the mid/macro series silently truncates the
+    # tradeable window without changing the reported period.
+    minutes = days * 24 * 60
+    trig_bars = min(int(minutes / tf_minutes) + 300, 50_000)
+    mid_bars = min(int(minutes / mid_min) + WARMUP + 50, 50_000)
+    macro_bars = min(int(minutes / macro_min) + WARMUP + 50, 50_000)
 
     if not quiet:
-        print(f"Fetching {symbol}: {bars_needed} bars of {tf_minutes}m data…")
-    df_trigger = connector.get_ohlcv(symbol, tf_trigger, min(bars_needed, 50_000))
-    df_mid = connector.get_ohlcv(symbol, tf_mid, 5_000)
-    df_macro = connector.get_ohlcv(symbol, tf_macro, 5_000)
+        print(f"Fetching {symbol}: {trig_bars} x {tf_minutes}m, "
+              f"{mid_bars} x {mid_min}m, {macro_bars} x {macro_min}m")
+    df_trigger = connector.get_ohlcv(symbol, tf_trigger, trig_bars)
+    df_mid = connector.get_ohlcv(symbol, tf_mid, mid_bars)
+    df_macro = connector.get_ohlcv(symbol, tf_macro, macro_bars)
 
     info = connector.get_symbol_info(symbol)
     market_open = connector.is_market_open(symbol)
@@ -193,6 +202,20 @@ def load_market(symbol: str, days: int, spread_override: float | None,
         buy_s[i], sell_s[i] = sc.buy_score, sc.sell_score
         adx_a[i], macd_a[i] = sc.adx, sc.macd_hist
 
+    valid = np.flatnonzero(buy_s >= 0)
+    first_valid = int(valid[0]) if len(valid) else n
+    if not quiet:
+        if first_valid >= n:
+            print("!  No bar had usable higher-timeframe context — nothing to simulate.")
+        else:
+            usable = (df_trigger["time"].iloc[-1] - df_trigger["time"].iloc[first_valid])
+            usable_days = usable.total_seconds() / 86400
+            print(f"Tradeable window: {usable_days:.1f} days "
+                  f"({n - first_valid} of {n} bars)")
+            if usable_days < days * 0.6:
+                print(f"!  Requested {days} days but only {usable_days:.0f} are usable —")
+                print("   the broker likely caps how far back this timeframe goes.")
+
     high = df_trigger["high"].to_numpy(dtype=float)
     low = df_trigger["low"].to_numpy(dtype=float)
     return MarketData(
@@ -204,13 +227,14 @@ def load_market(symbol: str, days: int, spread_override: float | None,
         buy_score=buy_s, sell_score=sell_s, adx=adx_a, macd_hist=macd_a,
         median_atr=float(np.nanmedian(df_trigger["atr"].to_numpy(dtype=float))),
         median_range=float(np.nanmedian(high - low)),
+        first_valid=first_valid,
     )
 
 
 def simulate(md: MarketData, p: Params,
              start: int | None = None, end: int | None = None) -> list[SimTrade]:
     """Replay `p` over bars [start, end). Pure function of precomputed data."""
-    start = WARMUP if start is None else max(start, WARMUP)
+    start = md.first_valid if start is None else max(start, md.first_valid)
     end = len(md.close) if end is None else min(end, len(md.close))
     spread_cost = md.spread * md.usd_per_unit
 
@@ -334,8 +358,10 @@ def _report(trades: list[SimTrade], md: MarketData) -> None:
         print("Try lowering SIGNAL_THRESHOLD or MIN_ADX, then re-run.")
         return
 
+    # Measure the window trades could actually occur in, not the whole fetch
     span_days = max(
-        (md.times[-1] - md.times[WARMUP]) / np.timedelta64(1, "D"), 1e-9
+        (md.times[-1] - md.times[min(md.first_valid, len(md.times) - 1)])
+        / np.timedelta64(1, "D"), 1e-9
     )
     pf = s["pf"]
     print(f"Period tested   : {span_days:.1f} days")

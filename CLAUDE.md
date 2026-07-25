@@ -60,6 +60,13 @@ All M5 (`BALANCED_MODE`), 30–44 days, spread charged per trade.
 2. **O(n²) recomputation.** Calling `analyze()` per bar recomputed every
    indicator over the whole series. Indicators are backward-looking, so
    compute once up front.
+3. **Under-fetched higher timeframes.** `df_mid`/`df_macro` were hardcoded to
+   5,000 bars while the trigger series scaled with the requested period. At M15
+   that capped the tradeable window at ~52 days, so `backtest.py XAUUSD 150`
+   returned byte-identical results to `XAUUSD 60` while reporting "224.6 days".
+   Every timeframe must be sized from the requested period, and the report must
+   measure the window from the first bar with usable context
+   (`MarketData.first_valid`), not the whole fetch.
 
 Dollar-based `TRAIL_ACTIVATE_USD` does not transfer across symbols: at $12 it
 arms after a $0.60 move on XAUUSD 0.2 lot (inside bar noise) but needs a $120
