@@ -49,7 +49,7 @@ def _tf_constants(cfg) -> tuple[int, int, int, int]:
     return mt5.TIMEFRAME_D1, mt5.TIMEFRAME_H4, mt5.TIMEFRAME_M15, 15
 
 
-def run_backtest(symbol: str, days: int) -> None:
+def run_backtest(symbol: str, days: int, spread_override: float | None = None) -> None:
     cfg = load_config()
     analyzer = TechnicalAnalyzer(cfg.indicators, cfg.risk)
     connector = MT5Connector(cfg.mt5)
@@ -64,9 +64,18 @@ def run_backtest(symbol: str, days: int) -> None:
     df_macro = connector.get_ohlcv(symbol, tf_macro, 5_000)
 
     info = connector.get_symbol_info(symbol)
+    connector_market_was_open = connector.is_market_open(symbol)
     connector.disconnect()
 
-    spread = info.ask - info.bid
+    live_spread = info.ask - info.bid
+    spread = spread_override if spread_override is not None else live_spread
+    if spread_override is not None:
+        print(f"!  Using spread override ${spread:.2f} (live tick shows ${live_spread:.2f})")
+    elif not connector_market_was_open:
+        print(f"!  Market appears CLOSED — the ${live_spread:.2f} spread is a weekend/holiday")
+        print("   figure and is much wider than normal. Pass a realistic spread as the")
+        print(f"   3rd argument, e.g.  python backtest.py {symbol} {days} 0.30")
+
     lot = cfg.fixed_lots.get(symbol)
     if lot is None:
         lot = info.volume_min
@@ -131,24 +140,26 @@ def run_backtest(symbol: str, days: int) -> None:
             elif not is_buy and bar["low"] <= trade["tp"]:
                 exit_px, reason = trade["tp"], "TP"
 
+            # Trailing stop. The floor comes from the peak as of the END of the
+            # PREVIOUS bar. Using this bar's high to raise the peak and its low
+            # to trigger the exit would assume an intrabar order we cannot know,
+            # and manufactures fake profit on every wide bar.
+            if exit_px is None and cfg.trail_activate_usd > 0 and cfg.trail_distance_usd > 0:
+                if trade["peak"] >= cfg.trail_activate_usd:
+                    locked = trade["peak"] - cfg.trail_distance_usd
+                    if locked > 0:
+                        offset = (locked + spread * usd_per_unit) / usd_per_unit
+                        floor_px = (trade["entry"] + offset) if is_buy else (trade["entry"] - offset)
+                        if is_buy and bar["low"] <= floor_px:
+                            exit_px, reason = floor_px, "trail"
+                        elif not is_buy and bar["high"] >= floor_px:
+                            exit_px, reason = floor_px, "trail"
+
+            # Update the peak AFTER the exit checks, so it only affects later bars
             if exit_px is None:
-                # Best price reached this bar → update peak profit
                 best_px = bar["high"] if is_buy else bar["low"]
                 best_move = (best_px - trade["entry"]) if is_buy else (trade["entry"] - best_px)
-                best_pl = best_move * usd_per_unit - spread * usd_per_unit
-                trade["peak"] = max(trade["peak"], best_pl)
-
-                # Trailing stop: lock (peak - distance) once activated
-                if cfg.trail_activate_usd > 0 and cfg.trail_distance_usd > 0:
-                    if trade["peak"] >= cfg.trail_activate_usd:
-                        locked = trade["peak"] - cfg.trail_distance_usd
-                        if locked > 0:
-                            offset = (locked + spread * usd_per_unit) / usd_per_unit
-                            floor_px = (trade["entry"] + offset) if is_buy else (trade["entry"] - offset)
-                            if is_buy and bar["low"] <= floor_px:
-                                exit_px, reason = floor_px, "trail"
-                            elif not is_buy and bar["high"] >= floor_px:
-                                exit_px, reason = floor_px, "trail"
+                trade["peak"] = max(trade["peak"], best_move * usd_per_unit - spread * usd_per_unit)
 
             if exit_px is None:
                 move = ((bar["close"] - trade["entry"]) if is_buy
@@ -271,4 +282,5 @@ if __name__ == "__main__":
     _cfg = load_config()
     _symbol = sys.argv[1] if len(sys.argv) > 1 else _cfg.symbols[0]
     _days = int(sys.argv[2]) if len(sys.argv) > 2 else 14
-    run_backtest(_symbol, _days)
+    _spread = float(sys.argv[3]) if len(sys.argv) > 3 else None
+    run_backtest(_symbol, _days, _spread)
