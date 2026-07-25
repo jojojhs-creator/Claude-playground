@@ -105,6 +105,17 @@ def run_backtest(symbol: str, days: int, spread_override: float | None = None) -
     mid_times = df_mid["time"].values
     macro_times = df_macro["time"].values
 
+    # Sanity check: how big is a typical bar and stop, in price and in dollars?
+    med_atr = float(df_trigger["atr"].median())
+    med_range = float((df_trigger["high"] - df_trigger["low"]).median())
+    print(f"Median {tf_minutes}m ATR ${med_atr:.2f} | median bar range ${med_range:.2f} "
+          f"| stop {cfg.risk.sl_atr_multiplier}xATR = ${med_atr*cfg.risk.sl_atr_multiplier:.2f} "
+          f"(${med_atr*cfg.risk.sl_atr_multiplier*usd_per_unit:.2f})")
+    if cfg.trail_activate_usd > 0:
+        trail_move = cfg.trail_activate_usd / usd_per_unit
+        print(f"Trail arms after a ${trail_move:.2f} move — that is "
+              f"{trail_move/max(med_range,1e-9)*100:.0f}% of a median bar's range")
+
     # Bars held before a forced time exit (0 = disabled)
     max_bars = 0
     if cfg.max_trade_age_seconds > 0:
