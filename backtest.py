@@ -5,8 +5,12 @@ so you can see what a setup would actually have done before risking money.
 Run:  python backtest.py                 (uses SYMBOLS from .env, 14 days)
       python backtest.py BTCUSD 30       (symbol, days)
 
-It simulates spread cost on every trade, which is the single biggest reason
-scalping setups that look good on paper lose money live.
+Models spread on every trade, the ATR stop, the take-profit, the trailing
+stop and the time/quick-profit/max-loss exits — i.e. the same exit plan the
+live bot runs. Indicators are computed once over the series (they are all
+backward-looking, so this is identical to recomputing per bar, just far
+faster) and every signal is evaluated on a COMPLETED bar with entry filled
+at the NEXT bar's open, so there is no lookahead.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-import pandas as pd
+import numpy as np
 
 from analyzer import Signal, TechnicalAnalyzer
 from config import load_config
@@ -52,7 +56,7 @@ def run_backtest(symbol: str, days: int) -> None:
     connector.connect()
 
     tf_macro, tf_mid, tf_trigger, tf_minutes = _tf_constants(cfg)
-    bars_needed = int(days * 24 * 60 / tf_minutes) + 300  # +warmup
+    bars_needed = int(days * 24 * 60 / tf_minutes) + 300
 
     print(f"Fetching {symbol}: {bars_needed} bars of {tf_minutes}m data…")
     df_trigger = connector.get_ohlcv(symbol, tf_trigger, min(bars_needed, 50_000))
@@ -60,127 +64,192 @@ def run_backtest(symbol: str, days: int) -> None:
     df_macro = connector.get_ohlcv(symbol, tf_macro, 5_000)
 
     info = connector.get_symbol_info(symbol)
+    connector.disconnect()
+
     spread = info.ask - info.bid
-    lot = cfg.fixed_lots.get(symbol, info.volume_min)
+    lot = cfg.fixed_lots.get(symbol)
+    if lot is None:
+        lot = info.volume_min
+        print(f"!  No {symbol.upper()}_LOT in .env — using broker minimum {lot}")
     usd_per_unit = lot * info.trade_contract_size
 
-    print(f"Lot {lot} | spread ${spread:.2f} | ${usd_per_unit:.2f} per $1 move")
-    print(f"Settings: threshold={cfg.risk.signal_threshold}/7  ADX>={cfg.risk.min_adx:.0f}  "
-          f"SL={cfg.risk.sl_atr_multiplier}xATR  RR=1:{cfg.risk.rr_ratio}")
+    print(f"Lot {lot} | spread ${spread:.2f} (costs ${spread*usd_per_unit:.2f}/trade) "
+          f"| ${usd_per_unit:.2f} per $1 move")
+    print(f"Entry : {cfg.risk.signal_threshold}/7 conditions, ADX>={cfg.risk.min_adx:.0f}, "
+          f"momentum gate {'on' if cfg.risk.require_momentum else 'off'}")
+    exits = [f"SL={cfg.risk.sl_atr_multiplier}xATR", f"TP=1:{cfg.risk.rr_ratio}"]
+    if cfg.trail_activate_usd > 0 and cfg.trail_distance_usd > 0:
+        exits.append(f"trail ${cfg.trail_activate_usd:.0f}/${cfg.trail_distance_usd:.0f}")
     if cfg.quick_profit_usd > 0:
-        print(f"          quick-profit ${cfg.quick_profit_usd:.2f}", end="")
+        exits.append(f"quick ${cfg.quick_profit_usd:.0f}")
     if cfg.max_loss_usd > 0:
-        print(f"  max-loss ${cfg.max_loss_usd:.2f}", end="")
-    print("\n" + "-" * 62)
+        exits.append(f"maxloss ${cfg.max_loss_usd:.0f}")
+    print(f"Exits : {', '.join(exits)}")
+    print("-" * 62)
+
+    # ── Precompute indicators once (all are backward-looking → no lookahead) ──
+    print("Computing indicators…")
+    df_trigger = analyzer._compute_indicators(df_trigger)
+    df_mid = analyzer._compute_indicators(df_mid)
+    df_macro = analyzer._compute_indicators(df_macro)
+
+    mid_times = df_mid["time"].values
+    macro_times = df_macro["time"].values
+
+    # Bars held before a forced time exit (0 = disabled)
+    max_bars = 0
+    if cfg.max_trade_age_seconds > 0:
+        max_bars = max(1, cfg.max_trade_age_seconds // (tf_minutes * 60))
+    elif cfg.max_trade_age_minutes > 0:
+        max_bars = max(1, cfg.max_trade_age_minutes // tf_minutes)
 
     warmup = 260
     trades: list[SimTrade] = []
-    open_trade: dict | None = None
+    trade: dict | None = None
+    total = len(df_trigger)
 
-    for i in range(warmup, len(df_trigger)):
+    print(f"Simulating {total - warmup} bars…")
+    for i in range(warmup, total):
+        if (i - warmup) % 2000 == 0 and i > warmup:
+            print(f"  …{i - warmup}/{total - warmup} bars, {len(trades)} trades")
+
         bar = df_trigger.iloc[i]
-        now = bar["time"]
 
-        # ── Manage an open position on this bar ──────────────────────────────
-        if open_trade:
-            hit = None
-            if open_trade["dir"] == "BUY":
-                if bar["low"] <= open_trade["sl"]:
-                    exit_px, hit = open_trade["sl"], "SL"
-                elif bar["high"] >= open_trade["tp"]:
-                    exit_px, hit = open_trade["tp"], "TP"
-            else:
-                if bar["high"] >= open_trade["sl"]:
-                    exit_px, hit = open_trade["sl"], "SL"
-                elif bar["low"] <= open_trade["tp"]:
-                    exit_px, hit = open_trade["tp"], "TP"
+        # ── Manage an open position ─────────────────────────────────────────
+        if trade is not None:
+            exit_px = None
+            reason = ""
+            is_buy = trade["dir"] == "BUY"
 
-            # Running P/L at this bar's close (for $ based exits)
-            if not hit:
-                move = ((bar["close"] - open_trade["entry"]) if open_trade["dir"] == "BUY"
-                        else (open_trade["entry"] - bar["close"]))
+            # Stop first (pessimistic: assume the adverse move happened first)
+            if is_buy and bar["low"] <= trade["sl"]:
+                exit_px, reason = trade["sl"], "SL"
+            elif not is_buy and bar["high"] >= trade["sl"]:
+                exit_px, reason = trade["sl"], "SL"
+            elif is_buy and bar["high"] >= trade["tp"]:
+                exit_px, reason = trade["tp"], "TP"
+            elif not is_buy and bar["low"] <= trade["tp"]:
+                exit_px, reason = trade["tp"], "TP"
+
+            if exit_px is None:
+                # Best price reached this bar → update peak profit
+                best_px = bar["high"] if is_buy else bar["low"]
+                best_move = (best_px - trade["entry"]) if is_buy else (trade["entry"] - best_px)
+                best_pl = best_move * usd_per_unit - spread * usd_per_unit
+                trade["peak"] = max(trade["peak"], best_pl)
+
+                # Trailing stop: lock (peak - distance) once activated
+                if cfg.trail_activate_usd > 0 and cfg.trail_distance_usd > 0:
+                    if trade["peak"] >= cfg.trail_activate_usd:
+                        locked = trade["peak"] - cfg.trail_distance_usd
+                        if locked > 0:
+                            offset = (locked + spread * usd_per_unit) / usd_per_unit
+                            floor_px = (trade["entry"] + offset) if is_buy else (trade["entry"] - offset)
+                            if is_buy and bar["low"] <= floor_px:
+                                exit_px, reason = floor_px, "trail"
+                            elif not is_buy and bar["high"] >= floor_px:
+                                exit_px, reason = floor_px, "trail"
+
+            if exit_px is None:
+                move = ((bar["close"] - trade["entry"]) if is_buy
+                        else (trade["entry"] - bar["close"]))
                 pl = move * usd_per_unit - spread * usd_per_unit
                 if cfg.quick_profit_usd > 0 and pl >= cfg.quick_profit_usd:
-                    exit_px, hit = bar["close"], "quick-profit"
+                    exit_px, reason = bar["close"], "quick-profit"
                 elif cfg.max_loss_usd > 0 and pl <= -cfg.max_loss_usd:
-                    exit_px, hit = bar["close"], "max-loss"
+                    exit_px, reason = bar["close"], "max-loss"
 
-            bars_held = i - open_trade["bar"]
-            max_bars = 0
-            if cfg.max_trade_age_seconds > 0:
-                max_bars = max(1, cfg.max_trade_age_seconds // (tf_minutes * 60))
-            elif cfg.max_trade_age_minutes > 0:
-                max_bars = max(1, cfg.max_trade_age_minutes // tf_minutes)
-            if not hit and max_bars and bars_held >= max_bars:
-                exit_px, hit = bar["close"], "time"
+            held = i - trade["bar"]
+            if exit_px is None and max_bars and held >= max_bars:
+                exit_px, reason = bar["close"], "time"
 
-            if hit:
-                move = ((exit_px - open_trade["entry"]) if open_trade["dir"] == "BUY"
-                        else (open_trade["entry"] - exit_px))
-                profit = move * usd_per_unit - spread * usd_per_unit  # spread charged once
-                trades.append(SimTrade(open_trade["dir"], open_trade["entry"],
-                                       exit_px, profit, bars_held, hit))
-                open_trade = None
+            if exit_px is not None:
+                move = ((exit_px - trade["entry"]) if is_buy else (trade["entry"] - exit_px))
+                profit = move * usd_per_unit - spread * usd_per_unit
+                trades.append(SimTrade(trade["dir"], trade["entry"], exit_px,
+                                       profit, held, reason))
+                trade = None
+            else:
+                continue
 
-        if open_trade:
+        if i + 1 >= total:
+            break
+
+        # ── Evaluate a signal on this COMPLETED bar ─────────────────────────
+        now = bar["time"]
+        j_mid = int(np.searchsorted(mid_times, np.datetime64(now), side="right")) - 1
+        j_macro = int(np.searchsorted(macro_times, np.datetime64(now), side="right")) - 1
+        if j_mid < warmup or j_macro < 10:
             continue
 
-        # ── Look for a new entry (no lookahead: slice everything up to `now`) ─
-        hist_trigger = df_trigger.iloc[: i + 1]
-        hist_mid = df_mid[df_mid["time"] <= now]
-        hist_macro = df_macro[df_macro["time"] <= now]
-        if len(hist_mid) < warmup or len(hist_macro) < warmup:
+        close = float(bar["close"])
+        atr = float(bar["atr"]) if bar["atr"] == bar["atr"] else 0.0
+        if atr <= 0:
             continue
 
-        result = analyzer.analyze(symbol, hist_macro, hist_mid, hist_mid, hist_trigger)
-        if result.signal == Signal.HOLD or result.atr <= 0:
+        sr = analyzer._detect_swing_levels(df_mid.iloc[: j_mid + 1], close)
+        near_sup = analyzer._nearest_level_below(sr.supports, close)
+        near_res = analyzer._nearest_level_above(sr.resistances, close)
+
+        mid_row = df_mid.iloc[j_mid]
+        macro_row = df_macro.iloc[j_macro]
+        signal, _ = analyzer._classify_signal(
+            symbol=symbol, d1=macro_row, h4=mid_row, h1=mid_row, m15=bar,
+            close=close, nearest_support=near_sup, nearest_resistance=near_res,
+        )
+        if signal == Signal.HOLD:
             continue
 
-        sl_dist = result.atr * cfg.risk.sl_atr_multiplier
+        # Fill at the NEXT bar's open — we cannot trade on a bar we just closed
+        entry = float(df_trigger.iloc[i + 1]["open"])
+        sl_dist = atr * cfg.risk.sl_atr_multiplier
         tp_dist = sl_dist * cfg.risk.rr_ratio
-        entry = bar["close"]
-        open_trade = {
-            "dir": result.signal.value,
+        is_buy = signal == Signal.BUY
+        trade = {
+            "dir": signal.value,
             "entry": entry,
-            "sl": entry - sl_dist if result.signal == Signal.BUY else entry + sl_dist,
-            "tp": entry + tp_dist if result.signal == Signal.BUY else entry - tp_dist,
-            "bar": i,
+            "sl": entry - sl_dist if is_buy else entry + sl_dist,
+            "tp": entry + tp_dist if is_buy else entry - tp_dist,
+            "bar": i + 1,
+            "peak": 0.0,
         }
 
-    connector.disconnect()
-    _report(trades, df_trigger, tf_minutes)
+    _report(trades, df_trigger, warmup, tf_minutes)
 
 
-def _report(trades: list[SimTrade], df, tf_minutes: int) -> None:
+def _report(trades: list[SimTrade], df, warmup: int, tf_minutes: int) -> None:
+    print("-" * 62)
     if not trades:
-        print("No trades taken. Filters may be too strict for this period.")
+        print("No trades taken — the entry filters are too strict for this period.")
+        print("Try lowering SIGNAL_THRESHOLD or MIN_ADX, then re-run.")
         return
 
     wins = [t for t in trades if t.profit_usd > 0]
     losses = [t for t in trades if t.profit_usd <= 0]
-    total = sum(t.profit_usd for t in trades)
+    net = sum(t.profit_usd for t in trades)
     gross_win = sum(t.profit_usd for t in wins)
     gross_loss = abs(sum(t.profit_usd for t in losses))
 
-    # Max drawdown on the running equity curve
-    equity, peak, max_dd = 0.0, 0.0, 0.0
+    equity = peak = max_dd = 0.0
     for t in trades:
         equity += t.profit_usd
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
 
-    span_days = (df.iloc[-1]["time"] - df.iloc[260]["time"]).total_seconds() / 86400
+    span_days = max(
+        (df.iloc[-1]["time"] - df.iloc[warmup]["time"]).total_seconds() / 86400, 1e-9
+    )
 
     print(f"Period tested   : {span_days:.1f} days")
-    print(f"Trades          : {len(trades)}  ({len(trades)/max(span_days,1):.1f}/day)")
+    print(f"Trades          : {len(trades)}  ({len(trades)/span_days:.1f}/day)")
     print(f"Win rate        : {len(wins)/len(trades)*100:.1f}%  ({len(wins)}W / {len(losses)}L)")
-    print(f"Avg win / loss  : ${gross_win/max(len(wins),1):.2f} / -${gross_loss/max(len(losses),1):.2f}")
-    print(f"Profit factor   : {gross_win/gross_loss:.2f}" if gross_loss else "Profit factor   : ∞")
+    print(f"Avg win         : ${gross_win/len(wins):.2f}" if wins else "Avg win         : n/a")
+    print(f"Avg loss        : -${gross_loss/len(losses):.2f}" if losses else "Avg loss        : n/a")
+    print(f"Profit factor   : {gross_win/gross_loss:.2f}" if gross_loss > 0 else "Profit factor   : inf (no losses)")
     print(f"Max drawdown    : -${max_dd:.2f}")
     print(f"Avg hold        : {sum(t.bars_held for t in trades)/len(trades)*tf_minutes:.0f} min")
     print("-" * 62)
-    verdict = "PROFITABLE" if total > 0 else "LOSING"
-    print(f"NET RESULT      : ${total:+.2f}   → {verdict}")
+    print(f"NET RESULT      : ${net:+.2f}   → {'PROFITABLE' if net > 0 else 'LOSING'}")
     print("-" * 62)
 
     by_reason: dict[str, list[float]] = {}
@@ -190,8 +259,8 @@ def _report(trades: list[SimTrade], df, tf_minutes: int) -> None:
     for reason, pls in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
         print(f"  {reason:<14} {len(pls):>4} trades   ${sum(pls):+9.2f}")
 
-    print("\nNote: real results will be worse — this ignores slippage, "
-          "requotes and variable spread.")
+    print("\nReal results will be worse: this ignores slippage, requotes,")
+    print("variable spread and swap. Treat a small profit here as break-even.")
 
 
 if __name__ == "__main__":
@@ -199,7 +268,7 @@ if __name__ == "__main__":
         print("MetaTrader5 package not available (Windows only).")
         sys.exit(1)
 
-    cfg = load_config()
-    symbol = sys.argv[1] if len(sys.argv) > 1 else cfg.symbols[0]
-    days = int(sys.argv[2]) if len(sys.argv) > 2 else 14
-    run_backtest(symbol, days)
+    _cfg = load_config()
+    _symbol = sys.argv[1] if len(sys.argv) > 1 else _cfg.symbols[0]
+    _days = int(sys.argv[2]) if len(sys.argv) > 2 else 14
+    run_backtest(_symbol, _days)
