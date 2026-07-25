@@ -74,6 +74,10 @@ class TradingEngine:
         self._known_position_tickets: set[int] = set()
         self._position_open_times: dict[int, datetime] = {}  # bot-opened ticket → UTC open time
         self._peak_profit: dict[int, float] = {}             # ticket → best profit seen (for trailing)
+        # Signals read the last COMPLETED bar (iloc[-2]), so a 200-period average
+        # needs 201 bars before it is even defined there. Fetch well clear of that
+        # or the SMA200 condition silently reads NaN and can never be satisfied.
+        self._bars = max(400, config.indicators.sma_200 + 150)
         self._last_scan: datetime | None = None
         self._next_scan: datetime | None = None
         self._tg_bot: TradingBotTelegram | None = None
@@ -136,9 +140,9 @@ class TradingEngine:
             tf_m15 = mt5.TIMEFRAME_M15 if mt5 else 15
             tf_m5 = mt5.TIMEFRAME_M5 if mt5 else 5
 
-            df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_h1, 300)
-            df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 300)
-            df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, 300)
+            df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_h1, self._bars)
+            df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, self._bars)
+            df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, self._bars)
             return self.analyzer.analyze(symbol, df_macro, df_mid, df_mid, df_trigger,
                                          use_forming_bar=False)
 
@@ -150,9 +154,9 @@ class TradingEngine:
             tf_m5 = mt5.TIMEFRAME_M5 if mt5 else 5
             tf_m1 = mt5.TIMEFRAME_M1 if mt5 else 1
 
-            df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 300)
-            df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, 300)
-            df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m1, 300)
+            df_macro = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, self._bars)
+            df_mid = await self._mt5(self._connector.get_ohlcv, symbol, tf_m5, self._bars)
+            df_trigger = await self._mt5(self._connector.get_ohlcv, symbol, tf_m1, self._bars)
             return self.analyzer.analyze(symbol, df_macro, df_mid, df_mid, df_trigger,
                                          use_forming_bar=self._config.turbo_mode)
 
@@ -161,10 +165,10 @@ class TradingEngine:
         tf_h1 = mt5.TIMEFRAME_H1 if mt5 else 16385
         tf_m15 = mt5.TIMEFRAME_M15 if mt5 else 15
 
-        df_d1 = await self._mt5(self._connector.get_ohlcv, symbol, tf_d1, 300)
-        df_h4 = await self._mt5(self._connector.get_ohlcv, symbol, tf_h4, 250)
-        df_h1 = await self._mt5(self._connector.get_ohlcv, symbol, tf_h1, 200)
-        df_m15 = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, 200)
+        df_d1 = await self._mt5(self._connector.get_ohlcv, symbol, tf_d1, self._bars)
+        df_h4 = await self._mt5(self._connector.get_ohlcv, symbol, tf_h4, self._bars)
+        df_h1 = await self._mt5(self._connector.get_ohlcv, symbol, tf_h1, self._bars)
+        df_m15 = await self._mt5(self._connector.get_ohlcv, symbol, tf_m15, self._bars)
 
         return self.analyzer.analyze(symbol, df_d1, df_h4, df_h1, df_m15,
                                      use_forming_bar=self._config.turbo_mode)

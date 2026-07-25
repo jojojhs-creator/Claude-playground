@@ -68,6 +68,15 @@ All M5 (`BALANCED_MODE`), 30–44 days, spread charged per trade.
    measure the window from the first bar with usable context
    (`MarketData.first_valid`), not the whole fetch.
 
+### Live bot ran a different strategy than the backtest
+
+`analyze_symbol()` fetched exactly 200 M15 bars while signals read `iloc[-2]`.
+A 200-period SMA needs 201 bars to be defined there, so `sma200` was NaN,
+`above_sma200` resolved to `None`, and the condition could satisfy neither BUY
+nor SELL — the live bot silently scored 5-of-**6** while the backtest scored
+5-of-7. Bar counts are now derived from `sma_200 + 150` (min 400), and
+`analyze()` logs a warning if `sma200` is ever NaN on the signal bar.
+
 Dollar-based `TRAIL_ACTIVATE_USD` does not transfer across symbols: at $12 it
 arms after a $0.60 move on XAUUSD 0.2 lot (inside bar noise) but needs a $120
 move on BTCUSD 0.1 lot. Make it ATR-relative if it is revived.

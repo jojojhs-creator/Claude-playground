@@ -107,6 +107,15 @@ class TechnicalAnalyzer:
         h1 = df_h1.iloc[idx]
         m15 = df_m15.iloc[idx]
 
+        sma200_val = m15.get("sma200")
+        if sma200_val is None or sma200_val != sma200_val:  # NaN
+            logger.warning(
+                "%s: SMA200 is NaN on the signal bar — only %d trigger bars supplied, "
+                "need > %d. The SMA200 condition cannot pass, so signals are "
+                "effectively scored out of 6 instead of 7.",
+                symbol, len(df_m15), self._cfg.sma_200,
+            )
+
         close = float(m15["close"])
         atr = float(m15.get("atr", h1.get("atr", 0)))
         adx = float(m15.get("adx", 0))
