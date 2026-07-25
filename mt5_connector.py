@@ -53,6 +53,8 @@ class SymbolInfo:
     trade_contract_size: float
     currency_profit: str
     trade_stops_level: int = 0  # broker min stop distance in points
+    tick_time: int = 0          # epoch seconds of last tick (0 = unknown)
+    trade_mode: int = 0         # 0 = disabled, 4 = full access (mt5.SYMBOL_TRADE_MODE_*)
 
 
 @dataclass
@@ -212,7 +214,26 @@ class MT5Connector:
             trade_contract_size=info.trade_contract_size,
             currency_profit=info.currency_profit,
             trade_stops_level=int(info.trade_stops_level),
+            tick_time=int(getattr(tick, "time", 0) or 0),
+            trade_mode=int(getattr(info, "trade_mode", 0) or 0),
         )
+
+    def is_market_open(self, symbol: str, max_tick_age_seconds: int = 300) -> bool:
+        """
+        True if the symbol looks tradeable right now.
+        A market that is closed (weekend, holiday) stops producing ticks, so a
+        stale last-tick time is the most reliable cross-broker signal.
+        """
+        try:
+            info = self.get_symbol_info(symbol)
+        except MT5Error:
+            return False
+        if info.trade_mode == 0:  # SYMBOL_TRADE_MODE_DISABLED
+            return False
+        if info.tick_time <= 0:
+            return False
+        age = time.time() - info.tick_time
+        return age <= max_tick_age_seconds
 
     @_with_reconnect()
     def get_account_info(self) -> AccountInfo:

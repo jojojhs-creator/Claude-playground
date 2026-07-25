@@ -73,6 +73,7 @@ class TradingEngine:
         self.symbols = config.symbols
         self._known_position_tickets: set[int] = set()
         self._position_open_times: dict[int, datetime] = {}  # bot-opened ticket → UTC open time
+        self._peak_profit: dict[int, float] = {}             # ticket → best profit seen (for trailing)
         self._last_scan: datetime | None = None
         self._next_scan: datetime | None = None
         self._tg_bot: TradingBotTelegram | None = None
@@ -86,6 +87,32 @@ class TradingEngine:
         """Run a synchronous MT5 call in a thread, serialized by lock."""
         async with self._mt5_lock:
             return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def _active_symbols(self) -> list[str]:
+        """
+        Symbols that are actually tradeable right now.
+        Falls back to WEEKEND_SYMBOLS (e.g. crypto) when the main markets are shut,
+        so the bot keeps working on weekends and holidays.
+        """
+        if not self._config.skip_closed_markets:
+            return self.symbols
+
+        open_main = []
+        for sym in self.symbols:
+            if await self._mt5(self._connector.is_market_open, sym):
+                open_main.append(sym)
+
+        if open_main:
+            return open_main
+
+        fallback = []
+        for sym in self._config.weekend_symbols:
+            if await self._mt5(self._connector.is_market_open, sym):
+                fallback.append(sym)
+
+        if fallback:
+            logger.info("Main markets closed — trading weekend symbols: %s", ", ".join(fallback))
+        return fallback
 
     def _within_trading_hours(self) -> bool:
         """True if the current UTC hour is inside the configured trading window."""
@@ -226,7 +253,12 @@ class TradingEngine:
         analysis_results: list[AnalysisResult] = []
         trades_opened = 0
 
-        for symbol in self.symbols:
+        active = await self._active_symbols()
+        if not active:
+            logger.info("No markets open right now (weekend/holiday) — skipping cycle")
+            return
+
+        for symbol in active:
             try:
                 logger.info("Analyzing %s…", symbol)
                 analysis = await self.analyze_symbol(symbol)
@@ -324,6 +356,13 @@ class TradingEngine:
                         logger.error("Max-loss exit failed for ticket %d: %s", p.ticket, e)
                     continue
 
+                # Trailing stop: once in profit, ratchet the SL up behind the peak
+                if self._config.trail_activate_usd > 0 and self._config.trail_distance_usd > 0:
+                    try:
+                        await self._update_trailing_stop(p)
+                    except Exception as e:
+                        logger.error("Trailing stop failed for ticket %d: %s", p.ticket, e)
+
                 # Time-based exit: close bot trades that exceeded max age
                 if max_age_seconds > 0:
                     opened = self._position_open_times.get(p.ticket)
@@ -361,8 +400,47 @@ class TradingEngine:
             self._position_open_times = {
                 t: v for t, v in self._position_open_times.items() if t in current_tickets
             }
+            self._peak_profit = {
+                t: v for t, v in self._peak_profit.items() if t in current_tickets
+            }
         except Exception as e:
             logger.error("Position monitor error: %s", e)
+
+    async def _update_trailing_stop(self, p) -> None:
+        """
+        Move the SL to lock in profit once the trade is far enough ahead.
+        Locks (peak_profit - trail_distance) dollars, and never moves the SL
+        backwards. Converts dollars to a price offset via contract size.
+        """
+        peak = max(self._peak_profit.get(p.ticket, 0.0), p.profit)
+        self._peak_profit[p.ticket] = peak
+
+        if peak < self._config.trail_activate_usd:
+            return  # not far enough ahead yet
+
+        locked_usd = peak - self._config.trail_distance_usd
+        if locked_usd <= 0:
+            return
+
+        info = await self._mt5(self._connector.get_symbol_info, p.symbol)
+        usd_per_price_unit = p.volume * info.trade_contract_size
+        if usd_per_price_unit <= 0:
+            return
+
+        offset = locked_usd / usd_per_price_unit
+        if p.order_type == OrderType.BUY:
+            new_sl = round(p.open_price + offset, info.digits)
+            better = new_sl > p.sl  # only ever ratchet upward
+        else:
+            new_sl = round(p.open_price - offset, info.digits)
+            better = p.sl == 0 or new_sl < p.sl
+
+        if not better:
+            return
+
+        await self._mt5(self._connector.modify_position_sl_tp, p.ticket, new_sl, p.tp)
+        logger.info("Ticket %d (%s): trailing SL → %.5g (locks $%.2f, peak $%.2f)",
+                    p.ticket, p.symbol, new_sl, locked_usd, peak)
 
     # ── Public interface for Telegram handlers ───────────────────────────────
 

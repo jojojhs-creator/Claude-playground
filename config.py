@@ -78,6 +78,10 @@ class AppConfig:
     balanced_mode: bool = False         # True → H1/M15/M5 timeframes, M5 trigger (quick but not noisy)
     trade_start_hour: int = 0           # only open new trades from this UTC hour (inclusive)
     trade_end_hour: int = 24            # ...until this UTC hour (exclusive); 0/24 = always on
+    weekend_symbols: list = field(default_factory=list)  # traded when the main symbols are closed
+    skip_closed_markets: bool = True    # skip symbols whose market is shut (stale ticks)
+    trail_activate_usd: float = 0.0     # start trailing once profit reaches this $ (0 = off)
+    trail_distance_usd: float = 0.0     # keep SL this many $ behind peak profit
 
 
 def _require(key: str) -> str:
@@ -133,6 +137,10 @@ def load_config(env_file: str = ".env") -> AppConfig:
     symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
     if not symbols:
         raise ConfigError("SYMBOLS must contain at least one symbol")
+
+    # Symbols to fall back on when the main ones are closed (crypto trades 24/7)
+    weekend_raw = os.getenv("WEEKEND_SYMBOLS", "").strip()
+    weekend_symbols = [s.strip() for s in weekend_raw.split(",") if s.strip()]
 
     max_risk = _float("MAX_RISK_PERCENT", 2.0)
     if not (0 < max_risk <= 10):
@@ -204,4 +212,8 @@ def load_config(env_file: str = ".env") -> AppConfig:
         balanced_mode=balanced_mode,
         trade_start_hour=_int("TRADE_START_HOUR", 0),
         trade_end_hour=_int("TRADE_END_HOUR", 24),
+        weekend_symbols=weekend_symbols,
+        skip_closed_markets=os.getenv("SKIP_CLOSED_MARKETS", "true").strip().lower() in ("1", "true", "yes"),
+        trail_activate_usd=_float("TRAIL_ACTIVATE_USD", 0.0),
+        trail_distance_usd=_float("TRAIL_DISTANCE_USD", 0.0),
     )
