@@ -1,0 +1,162 @@
+//@version=5
+// MTF Trend + Auto Trade Setup
+// Rebuilt from scratch — not derived from any protected script's source.
+//
+// Two parts:
+//   1. A multi-timeframe trend table (1W/1D/4H/30/15/5/1) classifying each
+//      timeframe as Bullish, Bearish or Consolidation, with a summary score.
+//   2. An automatic trade plan drawn on signal: entry (Long/Short), Stop,
+//      Add (pullback level), Trim (partial profit) and Target, with the risk
+//      and reward zones shaded.
+//
+// Trend rule per timeframe: ADX below the threshold = Consolidation (no trend),
+// otherwise EMA fast vs EMA slow decides Bullish or Bearish.
+//
+// Non-repainting: every higher-timeframe read uses the previous COMPLETED bar.
+// Set alerts to "Once Per Bar Close".
+
+indicator("MTF Trend + Auto Trade Setup", overlay=true, max_boxes_count=40, max_lines_count=200, max_labels_count=100)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+fastLen = input.int(20, "EMA fast", minval=1, group="Trend")
+slowLen = input.int(50, "EMA slow", minval=1, group="Trend")
+adxLen = input.int(14, "ADX length", minval=1, group="Trend")
+adxMin = input.float(20.0, "ADX below this = Consolidation", minval=1, group="Trend")
+
+tf1 = input.timeframe("W", "TF 1", group="Timeframes")
+tf2 = input.timeframe("D", "TF 2", group="Timeframes")
+tf3 = input.timeframe("240", "TF 3", group="Timeframes")
+tf4 = input.timeframe("30", "TF 4", group="Timeframes")
+tf5 = input.timeframe("15", "TF 5", group="Timeframes")
+tf6 = input.timeframe("5", "TF 6", group="Timeframes")
+tf7 = input.timeframe("1", "TF 7", group="Timeframes")
+
+atrLen = input.int(14, "ATR length", minval=1, group="Trade Setup")
+stopMult = input.float(1.5, "Stop = ATR x", minval=0.1, step=0.1, group="Trade Setup")
+rrTarget = input.float(3.0, "Target = risk x", minval=0.5, step=0.5, group="Trade Setup")
+rrTrim = input.float(1.5, "Trim = risk x", minval=0.5, step=0.5, group="Trade Setup")
+addFrac = input.float(0.5, "Add = risk x (below entry)", minval=0.1, step=0.1, group="Trade Setup")
+extendBars = input.int(30, "Extend plan (bars)", minval=5, group="Trade Setup")
+minAligned = input.int(3, "Min aligned timeframes to signal", minval=1, maxval=7, group="Trade Setup")
+
+showTable = input.bool(true, "Show trend table", group="Display")
+tablePos = input.string("Top right", "Table position", options=["Top right", "Bottom right", "Top left", "Bottom left"], group="Display")
+
+// ── Trend state: 1 bullish, -1 bearish, 0 consolidation ──────────────────────
+stateNow() =>
+    e1 = ta.ema(close, fastLen)
+    e2 = ta.ema(close, slowLen)
+    [_dip, _dim, adxv] = ta.dmi(adxLen, adxLen)
+    adxv < adxMin ? 0 : (e1 > e2 ? 1 : -1)
+
+// Previous completed bar on each timeframe → no repainting
+f_state(tf) => request.security(syminfo.tickerid, tf, stateNow()[1], lookahead=barmerge.lookahead_on)
+
+s1 = f_state(tf1)
+s2 = f_state(tf2)
+s3 = f_state(tf3)
+s4 = f_state(tf4)
+s5 = f_state(tf5)
+s6 = f_state(tf6)
+s7 = f_state(tf7)
+
+bullCount = (s1 == 1 ? 1 : 0) + (s2 == 1 ? 1 : 0) + (s3 == 1 ? 1 : 0) + (s4 == 1 ? 1 : 0) + (s5 == 1 ? 1 : 0) + (s6 == 1 ? 1 : 0) + (s7 == 1 ? 1 : 0)
+bearCount = (s1 == -1 ? 1 : 0) + (s2 == -1 ? 1 : 0) + (s3 == -1 ? 1 : 0) + (s4 == -1 ? 1 : 0) + (s5 == -1 ? 1 : 0) + (s6 == -1 ? 1 : 0) + (s7 == -1 ? 1 : 0)
+
+// ── Signal: chart trend flips while enough timeframes agree ──────────────────
+chartState = stateNow()
+atrV = ta.atr(atrLen)
+
+longSignal = chartState == 1 and chartState[1] != 1 and bullCount >= minAligned and bearCount < minAligned
+shortSignal = chartState == -1 and chartState[1] != -1 and bearCount >= minAligned and bullCount < minAligned
+
+// ── Draw the trade plan ───────────────────────────────────────────────────────
+var box  boxReward = na
+var box  boxRisk = na
+var line lnEntry = na
+var line lnStop = na
+var line lnTarget = na
+var line lnTrim = na
+var line lnAdd = na
+var label lbEntry = na
+var label lbStop = na
+var label lbTarget = na
+var label lbTrim = na
+var label lbAdd = na
+
+drawPlan(isLong, entry, risk) =>
+    stop = isLong ? entry - risk : entry + risk
+    target = isLong ? entry + risk * rrTarget : entry - risk * rrTarget
+    trim = isLong ? entry + risk * rrTrim : entry - risk * rrTrim
+    add = isLong ? entry - risk * addFrac : entry + risk * addFrac
+    l = bar_index
+    r = bar_index + extendBars
+
+    box.delete(boxReward)
+    box.delete(boxRisk)
+    line.delete(lnEntry)
+    line.delete(lnStop)
+    line.delete(lnTarget)
+    line.delete(lnTrim)
+    line.delete(lnAdd)
+    label.delete(lbEntry)
+    label.delete(lbStop)
+    label.delete(lbTarget)
+    label.delete(lbTrim)
+    label.delete(lbAdd)
+
+    boxReward := box.new(l, target, r, entry, border_color=color.new(color.teal, 60), bgcolor=color.new(color.teal, 88))
+    boxRisk := box.new(l, entry, r, stop, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 88))
+
+    lnEntry := line.new(l, entry, r, entry, color=color.new(color.gray, 0), width=2)
+    lnStop := line.new(l, stop, r, stop, color=color.new(color.red, 0), width=2)
+    lnTarget := line.new(l, target, r, target, color=color.new(color.teal, 0), width=2)
+    lnTrim := line.new(l, trim, r, trim, color=color.new(color.teal, 30), style=line.style_dotted)
+    lnAdd := line.new(l, add, r, add, color=color.new(color.red, 30), style=line.style_dotted)
+
+    lbEntry := label.new(r, entry, isLong ? "Long" : "Short", style=label.style_label_left, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+    lbStop := label.new(r, stop, "Stop", style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+    lbTarget := label.new(r, target, "Target", style=label.style_label_left, color=color.new(color.orange, 20), textcolor=color.white, size=size.small)
+    lbTrim := label.new(r, trim, "Trim", style=label.style_label_left, color=color.new(color.orange, 40), textcolor=color.white, size=size.small)
+    lbAdd := label.new(r, add, "Add", style=label.style_label_left, color=color.new(color.red, 40), textcolor=color.white, size=size.small)
+
+if longSignal
+    drawPlan(true, close, atrV * stopMult)
+if shortSignal
+    drawPlan(false, close, atrV * stopMult)
+
+plotshape(longSignal, "Long signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 0), size=size.small)
+plotshape(shortSignal, "Short signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+// ── Trend table ───────────────────────────────────────────────────────────────
+f_pos() => tablePos == "Top right" ? position.top_right : tablePos == "Bottom right" ? position.bottom_right : tablePos == "Top left" ? position.top_left : position.bottom_left
+f_txt(s) => s == 1 ? "Bullish" : s == -1 ? "Bearish" : "Consolidation"
+f_col(s) => s == 1 ? color.new(color.teal, 0) : s == -1 ? color.new(color.red, 0) : color.new(color.gray, 30)
+f_dot(s) => s == 0 ? "○" : "●"
+
+var table tbl = na
+if showTable and barstate.islast
+    table.delete(tbl)
+    tbl := table.new(f_pos(), 3, 9, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.cell(tbl, 0, 0, "TF", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 0, "", bgcolor=color.new(color.black, 70))
+    table.cell(tbl, 2, 0, "TREND", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
+
+    labels = array.from(tf1, tf2, tf3, tf4, tf5, tf6, tf7)
+    states = array.from(s1, s2, s3, s4, s5, s6, s7)
+    for i = 0 to 6
+        st = array.get(states, i)
+        table.cell(tbl, 0, i + 1, array.get(labels, i), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+        table.cell(tbl, 1, i + 1, f_dot(st), text_color=f_col(st), bgcolor=color.new(color.black, 75), text_size=size.small)
+        table.cell(tbl, 2, i + 1, f_txt(st), text_color=f_col(st), bgcolor=color.new(color.black, 75), text_size=size.small)
+
+    sumTxt = bullCount > bearCount ? str.tostring(bullCount) + "/7 Bullish" : bearCount > bullCount ? str.tostring(bearCount) + "/7 Bearish" : "Mixed"
+    sumCol = bullCount > bearCount ? color.teal : bearCount > bullCount ? color.red : color.gray
+    table.cell(tbl, 0, 8, "SUMMARY", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 8, "", bgcolor=color.new(color.black, 70))
+    table.cell(tbl, 2, 8, sumTxt, text_color=sumCol, bgcolor=color.new(color.black, 70), text_size=size.small)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(longSignal, "Long setup", "LONG setup on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(shortSignal, "Short setup", "SHORT setup on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(longSignal or shortSignal, "Any setup", "Setup on {{ticker}} ({{interval}}) @ {{close}}")
