@@ -1,19 +1,19 @@
 //@version=5
 // Liquidity Sweep + IFVG + CISD
 //
-//   1. LIQUIDITY SWEEP — price runs beyond a prior swing and closes back
-//      inside. Each pool is swept ONCE, then consumed.
+//   1. SWEEP — price takes out a prior swing. Each pool is used once.
 //   2. CISD — a close back through the open of the first candle of the last
 //      opposing run means delivery has flipped.
-//   3. IFVG — a 3-bar gap that later gets closed through flips polarity and
-//      acts as support/resistance from the other side.
+//   3. IFVG — a 3-bar gap that gets closed through flips polarity and acts as
+//      support/resistance from the other side.
 //
-// A sweep arms the setup; a CISD within the arm window fires the entry.
+// Two premises, each independently toggleable:
+//   REVERSAL     — liquidity taken, price turns back. Stop beyond the extreme.
+//   CONTINUATION — liquidity taken and price HOLDS beyond it. Stop back at the
+//                  level, since falling inside proves the breakout failed.
 //
-// Drawing is deliberately sparse. Only two liquidity levels are ever on the
-// chart — the live ones — and they are removed once taken. Fresh gaps are
-// hidden by default because they are not actionable; only INVERTED gaps
-// (IFVGs) are drawn, since those are the zones you would trade from.
+// Chart hygiene: every drawing belonging to a trade is tracked, so a finished
+// or superseded setup can be erased instead of accumulating forever.
 //
 // Signals evaluate on CLOSED bars — set alerts to "Once Per Bar Close".
 
@@ -22,7 +22,7 @@ indicator("Liquidity Sweep + IFVG + CISD", shorttitle="Liq+IFVG+CISD", overlay=t
 // ── Liquidity ─────────────────────────────────────────────────────────────────
 pivotLen = input.int(8, "Swing lookback for liquidity", minval=2, group="Liquidity")
 maxPools = input.int(6, "Liquidity pools tracked per side", minval=1, maxval=20, group="Liquidity")
-requireCloseBack = input.bool(false, "Sweep candle must also close back inside", group="Liquidity", tooltip="Off by default. CISD is already the reversal confirmation, so demanding rejection on the sweep candle too means almost nothing fires in a trend.")
+requireCloseBack = input.bool(false, "Sweep candle must also close back inside", group="Liquidity")
 armBars = input.int(12, "Setup stays armed for (bars)", minval=1, group="Liquidity")
 tradeReversal = input.bool(true, "Trade REVERSALS (sweep high -> short)", group="Liquidity")
 tradeCont = input.bool(true, "Trade CONTINUATIONS (sweep high, hold above -> long)", group="Liquidity")
@@ -32,31 +32,34 @@ minRunLen = input.int(2, "Min candles in the opposing run", minval=1, group="CIS
 
 // ── IFVG ──────────────────────────────────────────────────────────────────────
 useIfvg = input.bool(false, "Require price inside an IFVG to enter", group="IFVG")
-maxFvg = input.int(10, "Track this many recent gaps", minval=1, maxval=30, group="IFVG")
-minFvgAtr = input.float(0.20, "Ignore gaps smaller than (x ATR)", minval=0.0, step=0.05, group="IFVG")
-fvgExtend = input.int(50, "Stop extending a zone after (bars)", minval=5, group="IFVG")
+maxFvg = input.int(6, "Track this many recent gaps", minval=1, maxval=30, group="IFVG")
+minFvgAtr = input.float(0.25, "Ignore gaps smaller than (x ATR)", minval=0.0, step=0.05, group="IFVG")
+fvgExtend = input.int(40, "Stop extending a zone after (bars)", minval=5, group="IFVG")
 
 // ── Risk ──────────────────────────────────────────────────────────────────────
-slBufAtr = input.float(0.25, "Stop beyond sweep extreme (x ATR)", minval=0.0, step=0.05, group="Risk")
+slBufAtr = input.float(0.25, "Stop beyond the level (x ATR)", minval=0.0, step=0.05, group="Risk")
 maxRiskAtr = input.float(1.5, "Cap risk at (x ATR from entry)", minval=0.3, step=0.1, group="Risk")
 rrMult = input.float(2.0, "Target = risk x", minval=0.5, step=0.5, group="Risk")
 cooldownBars = input.int(5, "Min bars between signals", minval=0, group="Risk")
-confirmedOnly = input.bool(true, "Only signal on closed candles", group="Risk", tooltip="On: a signal appears only once the candle closes, so it can never appear then vanish. Off: signals show live on the forming candle and may disappear if price pulls back before the close.")
+confirmedOnly = input.bool(true, "Only signal on closed candles", group="Risk")
 
-// ── What to draw — everything noisy is off by default ────────────────────────
-showLiq = input.bool(true, "Live liquidity levels (max 2 on screen)", group="Chart")
-showSweepMark = input.bool(true, "Mark the sweep", group="Chart")
-showIfvg = input.bool(true, "IFVG zones (inverted gaps only)", group="Chart")
+// ── Chart ─────────────────────────────────────────────────────────────────────
+hidePast = input.bool(true, "Hide the previous signal when a new one fires", group="Chart")
+hideDone = input.bool(false, "Also hide a signal once its TP or SL is hit", group="Chart")
+showLiq = input.bool(true, "Live liquidity levels", group="Chart")
+showSweepMark = input.bool(true, "Mark sweeps", group="Chart")
+maxSweepMarks = input.int(3, "Keep only this many sweep marks", minval=1, maxval=20, group="Chart")
+showIfvg = input.bool(true, "IFVG zones", group="Chart")
+showIfvgLabel = input.bool(false, "Label each IFVG", group="Chart")
 showFreshFvg = input.bool(false, "Also show fresh gaps — noisy", group="Chart")
-showPending = input.bool(true, "Live CISD level while a setup is armed", group="Chart")
-showCisdOnSignal = input.bool(true, "CISD level on the signal itself", group="Chart")
-showPosBox = input.bool(true, "Shade the position (profit / risk)", group="Chart")
-tradeBars = input.int(30, "Entry / TP / SL line length (bars)", minval=5, group="Chart")
+showPending = input.bool(true, "Live CISD level while armed", group="Chart")
+showPosBox = input.bool(true, "Shade the position", group="Chart")
+tradeBars = input.int(30, "Trade line length (bars)", minval=5, group="Chart")
 showStats = input.bool(true, "Results table", group="Chart")
 
 atrV = ta.atr(14)
 
-// ── Liquidity pools — several tracked per side, each usable once ─────────────
+// ── Liquidity pools ───────────────────────────────────────────────────────────
 ph = ta.pivothigh(high, pivotLen, pivotLen)
 pl = ta.pivotlow(low, pivotLen, pivotLen)
 
@@ -65,11 +68,11 @@ var array<float> poolLo = array.new_float()
 var array<line> poolHiLn = array.new_line()
 var array<line> poolLoLn = array.new_line()
 
-// A pivot confirms pivotLen bars late; if price already traded through the
-// level in that window the pool is gone before we could ever use it.
+// A pivot confirms pivotLen bars late; if price already went through it in that
+// window the pool was gone before we could ever use it.
 if not na(ph) and ta.highest(high, pivotLen) <= ph
     array.push(poolHi, ph)
-    array.push(poolHiLn, showLiq ? line.new(bar_index - pivotLen, ph, bar_index, ph, color=color.new(color.red, 55), style=line.style_dashed, width=1) : na)
+    array.push(poolHiLn, showLiq ? line.new(bar_index - pivotLen, ph, bar_index, ph, color=color.new(color.red, 60), style=line.style_dashed, width=1) : na)
     while array.size(poolHi) > maxPools
         dl = array.shift(poolHiLn)
         if not na(dl)
@@ -78,14 +81,13 @@ if not na(ph) and ta.highest(high, pivotLen) <= ph
 
 if not na(pl) and ta.lowest(low, pivotLen) >= pl
     array.push(poolLo, pl)
-    array.push(poolLoLn, showLiq ? line.new(bar_index - pivotLen, pl, bar_index, pl, color=color.new(color.teal, 55), style=line.style_dashed, width=1) : na)
+    array.push(poolLoLn, showLiq ? line.new(bar_index - pivotLen, pl, bar_index, pl, color=color.new(color.teal, 60), style=line.style_dashed, width=1) : na)
     while array.size(poolLo) > maxPools
         dl2 = array.shift(poolLoLn)
         if not na(dl2)
             line.delete(dl2)
         array.shift(poolLo)
 
-// Any untouched pool can be swept, not just the newest one
 sweptHigh = false
 sweptLow = false
 var float sweepHighPx = na
@@ -127,14 +129,18 @@ if array.size(poolLo) > 0
             else if not na(array.get(poolLoLn, j))
                 line.set_x2(array.get(poolLoLn, j), bar_index)
 
+// Only the most recent sweep marks are kept
+var array<label> sweepLbls = array.new_label()
 if sweptHigh
     armedBearBar := bar_index
     if showSweepMark
-        label.new(bar_index, high, "SWEEP", style=label.style_label_down, color=color.new(color.red, 25), textcolor=color.white, size=size.tiny)
+        array.push(sweepLbls, label.new(bar_index, high, "SWEEP", style=label.style_label_down, color=color.new(color.red, 30), textcolor=color.white, size=size.tiny))
 if sweptLow
     armedBullBar := bar_index
     if showSweepMark
-        label.new(bar_index, low, "SWEEP", style=label.style_label_up, color=color.new(color.teal, 25), textcolor=color.white, size=size.tiny)
+        array.push(sweepLbls, label.new(bar_index, low, "SWEEP", style=label.style_label_up, color=color.new(color.teal, 30), textcolor=color.white, size=size.tiny))
+while array.size(sweepLbls) > maxSweepMarks
+    label.delete(array.shift(sweepLbls))
 
 bullArmed = bar_index - armedBullBar <= armBars
 bearArmed = bar_index - armedBearBar <= armBars
@@ -171,9 +177,7 @@ if isDn and isUp[1] and curUpLen >= minRunLen and not na(curUpOpen)
 cisdBull = not na(cisdBullLevel) and close > cisdBullLevel and close[1] <= cisdBullLevel
 cisdBear = not na(cisdBearLevel) and close < cisdBearLevel and close[1] >= cisdBearLevel
 
-// While a setup is armed, show the level price has to reclaim for the entry to
-// trigger. This is the part worth watching in advance; drawing CISD only after
-// the fact told you nothing you could act on.
+// Level to reclaim, shown live while a setup is armed
 var line lnPend = na
 var label lbPend = na
 pendIsBull = bullArmed and not na(cisdBullLevel)
@@ -186,10 +190,10 @@ if showPending
     if not na(pendLvl)
         pcol = pendIsBull ? color.teal : color.red
         pFrom = pendIsBull ? armedBullBar : armedBearBar
-        lnPend := line.new(pFrom, pendLvl, bar_index + 4, pendLvl, color=color.new(pcol, 25), style=line.style_dotted, width=2)
-        lbPend := label.new(bar_index + 4, pendLvl, "CISD " + str.tostring(pendLvl, format.mintick), style=label.style_label_left, color=color.new(pcol, 55), textcolor=color.white, size=size.tiny)
+        lnPend := line.new(pFrom, pendLvl, bar_index + 4, pendLvl, color=color.new(pcol, 30), style=line.style_dotted, width=2)
+        lbPend := label.new(bar_index + 4, pendLvl, "CISD " + str.tostring(pendLvl, format.mintick), style=label.style_label_left, color=color.new(pcol, 60), textcolor=color.white, size=size.tiny)
 
-// ── Gaps: tracked always, drawn only once they invert into IFVGs ─────────────
+// ── Gaps, drawn only once they invert ────────────────────────────────────────
 var array<float> fTop = array.new_float()
 var array<float> fBot = array.new_float()
 var array<int> fDir = array.new_int()
@@ -206,14 +210,14 @@ if bullGap
     array.push(fDir, 1)
     array.push(fInv, false)
     array.push(fBar, bar_index)
-    array.push(fBox, showFreshFvg ? box.new(bar_index - 2, low, bar_index, high[2], border_color=color.new(color.gray, 80), bgcolor=color.new(color.teal, 94)) : na)
+    array.push(fBox, showFreshFvg ? box.new(bar_index - 2, low, bar_index, high[2], border_color=color.new(color.gray, 85), bgcolor=color.new(color.teal, 95)) : na)
 if bearGap
     array.push(fTop, low[2])
     array.push(fBot, high)
     array.push(fDir, -1)
     array.push(fInv, false)
     array.push(fBar, bar_index)
-    array.push(fBox, showFreshFvg ? box.new(bar_index - 2, low[2], bar_index, high, border_color=color.new(color.gray, 80), bgcolor=color.new(color.red, 94)) : na)
+    array.push(fBox, showFreshFvg ? box.new(bar_index - 2, low[2], bar_index, high, border_color=color.new(color.gray, 85), bgcolor=color.new(color.red, 95)) : na)
 
 while array.size(fTop) > maxFvg
     ob = array.shift(fBox)
@@ -228,35 +232,34 @@ while array.size(fTop) > maxFvg
 inBullIfvg = false
 inBearIfvg = false
 if array.size(fTop) > 0
-    for i = 0 to array.size(fTop) - 1
-        ft = array.get(fTop, i)
-        fb = array.get(fBot, i)
-        fd = array.get(fDir, i)
-        fi = array.get(fInv, i)
-        fx = array.get(fBox, i)
-        st = array.get(fBar, i)
+    for k = 0 to array.size(fTop) - 1
+        ft = array.get(fTop, k)
+        fb = array.get(fBot, k)
+        fd = array.get(fDir, k)
+        fi = array.get(fInv, k)
+        fx = array.get(fBox, k)
+        stb = array.get(fBar, k)
         if not fi
             violated = fd == 1 ? close < fb : close > ft
             if violated
-                array.set(fInv, i, true)
-                // The zone only becomes worth drawing at the moment it inverts
+                array.set(fInv, k, true)
                 if showIfvg
                     bull = fd == -1
                     col = bull ? color.teal : color.orange
                     if na(fx)
-                        fx := box.new(bar_index, ft, bar_index + 1, fb, border_color=color.new(col, 30), bgcolor=color.new(col, 85), border_width=1)
-                        array.set(fBox, i, fx)
+                        fx := box.new(bar_index, ft, bar_index + 1, fb, border_color=color.new(col, 40), bgcolor=color.new(col, 88), border_width=1)
+                        array.set(fBox, k, fx)
                     else
-                        box.set_bgcolor(fx, color.new(col, 85))
-                        box.set_border_color(fx, color.new(col, 30))
-                        box.set_border_width(fx, 1)
-                    label.new(bar_index, bull ? fb : ft, "IFVG", style=bull ? label.style_label_up : label.style_label_down, color=color.new(col, 30), textcolor=color.white, size=size.tiny)
+                        box.set_bgcolor(fx, color.new(col, 88))
+                        box.set_border_color(fx, color.new(col, 40))
+                    if showIfvgLabel
+                        label.new(bar_index, bull ? fb : ft, "IFVG", style=bull ? label.style_label_up : label.style_label_down, color=color.new(col, 40), textcolor=color.white, size=size.tiny)
         else
             if fd == -1 and low <= ft and high >= fb
                 inBullIfvg := true
             if fd == 1 and high >= ft and low <= fb
                 inBearIfvg := true
-        if not na(fx) and bar_index - st <= fvgExtend
+        if not na(fx) and bar_index - stb <= fvgExtend
             box.set_right(fx, bar_index + 1)
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
@@ -266,19 +269,14 @@ cooled = bar_index - lastSigBar >= cooldownBars
 ifvgBuyOk = not useIfvg or inBullIfvg
 ifvgSellOk = not useIfvg or inBearIfvg
 
-// REVERSAL: liquidity taken, then price turns back. Wrong if it runs on.
 revBuy = tradeReversal and bullArmed and cisdBull and not na(sweepLowPx)
 revSell = tradeReversal and bearArmed and cisdBear and not na(sweepHighPx)
-
-// CONTINUATION: liquidity taken and price HOLDS beyond it. Wrong if it
-// falls back inside the level it just cleared.
 contBuy = tradeCont and bearArmed and cisdBull and not na(sweptHiLvl) and close > sweptHiLvl
 contSell = tradeCont and bullArmed and cisdBear and not na(sweptLoLvl) and close < sweptLoLvl
 
 rawBuy = (revBuy or contBuy) and cooled and ifvgBuyOk
 rawSell = (revSell or contSell) and cooled and ifvgSellOk
 
-// Stop sits at whatever invalidates that particular premise
 buyAnchor = revBuy ? sweepLowPx : sweptHiLvl
 sellAnchor = revSell ? sweepHighPx : sweptLoLvl
 buySl = math.max(buyAnchor - atrV * slBufAtr, close - atrV * maxRiskAtr)
@@ -288,36 +286,50 @@ sellRisk = sellSl - close
 buyTp = close + buyRisk * rrMult
 sellTp = close - sellRisk * rrMult
 
-// On the forming bar `close` is just the current price, so a live signal can
-// appear and then vanish if price pulls back before the candle closes.
 barOk = not confirmedOnly or barstate.isconfirmed
 buyOk = rawBuy and buyRisk > 0 and barOk
 sellOk = rawSell and sellRisk > 0 and barOk
 buySignal = buyOk and not sellOk
 sellSignal = sellOk and not buyOk
 
-// Entry / TP / SL as three clean lines rather than filled blocks
+// ── Drawing, with every object tracked so it can be erased ───────────────────
+var array<line> tLines = array.new_line()
+var array<label> tLabels = array.new_label()
+var array<box> tBoxes = array.new_box()
+
+f_clear() =>
+    while array.size(tLines) > 0
+        line.delete(array.pop(tLines))
+    while array.size(tLabels) > 0
+        label.delete(array.pop(tLabels))
+    while array.size(tBoxes) > 0
+        box.delete(array.pop(tBoxes))
+
 f_draw(isBuy, entry, tp, sl, cisdLvl, kind) =>
     col = isBuy ? color.teal : color.red
     x1 = bar_index
     x2 = bar_index + tradeBars
-    line.new(x1, entry, x2, entry, color=color.new(col, 0), width=2)
-    line.new(x1, tp, x2, tp, color=color.new(color.teal, 20), style=line.style_dashed, width=1)
-    line.new(x1, sl, x2, sl, color=color.new(color.red, 20), style=line.style_dashed, width=1)
-    label.new(x2, entry, (isBuy ? "▲ BUY " : "▼ SELL ") + kind + " " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(col, 15), textcolor=color.white, size=size.small)
-    label.new(x2, tp, "TP " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.teal, 40), textcolor=color.white, size=size.tiny)
-    label.new(x2, sl, "SL " + str.tostring(sl, format.mintick), style=label.style_label_left, color=color.new(color.red, 40), textcolor=color.white, size=size.tiny)
+    array.push(tLines, line.new(x1, entry, x2, entry, color=color.new(col, 0), width=2))
+    array.push(tLines, line.new(x1, tp, x2, tp, color=color.new(color.teal, 25), style=line.style_dashed, width=1))
+    array.push(tLines, line.new(x1, sl, x2, sl, color=color.new(color.red, 25), style=line.style_dashed, width=1))
+    array.push(tLabels, label.new(x2, entry, (isBuy ? "▲ BUY " : "▼ SELL ") + kind + " " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(col, 15), textcolor=color.white, size=size.small))
+    array.push(tLabels, label.new(x2, tp, "TP " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.teal, 45), textcolor=color.white, size=size.tiny))
+    array.push(tLabels, label.new(x2, sl, "SL " + str.tostring(sl, format.mintick), style=label.style_label_left, color=color.new(color.red, 45), textcolor=color.white, size=size.tiny))
     if showPosBox
-        box.new(x1, math.max(tp, entry), x2, math.min(tp, entry), border_color=color.new(color.teal, 80), bgcolor=color.new(color.teal, 90))
-        box.new(x1, math.max(entry, sl), x2, math.min(entry, sl), border_color=color.new(color.red, 80), bgcolor=color.new(color.red, 90))
-    if showCisdOnSignal and not na(cisdLvl)
-        line.new(x1 - 10, cisdLvl, x1 + 2, cisdLvl, color=color.new(col, 0), style=line.style_dotted, width=2)
-        label.new(x1 - 10, cisdLvl, "CISD ✓ " + str.tostring(cisdLvl, format.mintick), style=label.style_label_right, color=color.new(col, 25), textcolor=color.white, size=size.tiny)
+        array.push(tBoxes, box.new(x1, math.max(tp, entry), x2, math.min(tp, entry), border_color=color.new(color.teal, 85), bgcolor=color.new(color.teal, 92)))
+        array.push(tBoxes, box.new(x1, math.max(entry, sl), x2, math.min(entry, sl), border_color=color.new(color.red, 85), bgcolor=color.new(color.red, 92)))
+    if not na(cisdLvl)
+        array.push(tLines, line.new(x1 - 8, cisdLvl, x1 + 2, cisdLvl, color=color.new(col, 20), style=line.style_dotted, width=2))
+        array.push(tLabels, label.new(x1 - 8, cisdLvl, "CISD ✓", style=label.style_label_right, color=color.new(col, 40), textcolor=color.white, size=size.tiny))
 
 if buySignal
+    if hidePast
+        f_clear()
     f_draw(true, close, buyTp, buySl, cisdBullLevel, revBuy ? "rev" : "cont")
     lastSigBar := bar_index
 if sellSignal
+    if hidePast
+        f_clear()
     f_draw(false, close, sellTp, sellSl, cisdBearLevel, revSell ? "rev" : "cont")
     lastSigBar := bar_index
 
@@ -326,7 +338,6 @@ var bool inTrade = false
 var bool tIsBuy = false
 var float tSl = na
 var float tTp = na
-var float tRisk = na
 var int tBar = na
 var int nTrades = 0
 var int nWins = 0
@@ -338,21 +349,21 @@ if (buySignal or sellSignal) and not inTrade
     tIsBuy := buySignal
     tSl := buySignal ? buySl : sellSl
     tTp := buySignal ? buyTp : sellTp
-    tRisk := math.abs(close - tSl)
     tBar := bar_index
     nTrades := nTrades + 1
 
 if inTrade and bar_index > tBar
     hitSl = tIsBuy ? low <= tSl : high >= tSl
     hitTp = tIsBuy ? high >= tTp : low <= tTp
-    if hitSl
-        sumR := sumR - 1.0
-        nLosses := nLosses + 1
+    if hitSl or hitTp
+        sumR := sumR + (hitSl ? -1.0 : rrMult)
+        if hitSl
+            nLosses := nLosses + 1
+        else
+            nWins := nWins + 1
         inTrade := false
-    else if hitTp
-        sumR := sumR + rrMult
-        nWins := nWins + 1
-        inTrade := false
+        if hideDone
+            f_clear()
 
 var table stt = na
 if showStats and barstate.islast
@@ -371,6 +382,6 @@ if showStats and barstate.islast
     table.cell(stt, 0, 4, "Net R / avg", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 1, 4, str.tostring(sumR, "#.1") + "R / " + str.tostring(ex, "#.2") + "R", text_color=sumR > 0 ? color.teal : color.red, bgcolor=color.new(color.black, 70), text_size=size.small)
 
-alertcondition(buySignal, "BUY sweep+CISD", "BUY — liquidity swept low, CISD confirmed on {{ticker}} @ {{close}}")
-alertcondition(sellSignal, "SELL sweep+CISD", "SELL — liquidity swept high, CISD confirmed on {{ticker}} @ {{close}}")
-alertcondition(buySignal or sellSignal, "Any signal", "Sweep + CISD signal on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(buySignal, "BUY", "BUY — sweep + CISD on {{ticker}} @ {{close}}")
+alertcondition(sellSignal, "SELL", "SELL — sweep + CISD on {{ticker}} @ {{close}}")
+alertcondition(buySignal or sellSignal, "Any signal", "Signal on {{ticker}} ({{interval}}) @ {{close}}")
