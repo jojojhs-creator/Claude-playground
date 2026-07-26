@@ -32,8 +32,8 @@ useBreak = input.bool(true, "Breakout signals", group="Signals")
 useReentry = input.bool(true, "Failed-break re-entry signals (highest quality)", group="Signals")
 
 // ── Trade quality — these stop bad-geometry orders ────────────────────────────
-minRR = input.float(1.2, "Minimum reward:risk", minval=0.1, step=0.1, group="Trade quality")
-maxChaseAtr = input.float(0.6, "Max distance from level at entry (x ATR)", minval=0.1, step=0.1, group="Trade quality")
+minRR = input.float(1.0, "Minimum reward:risk", minval=0.1, step=0.1, group="Trade quality")
+maxChaseAtr = input.float(1.5, "Max distance from level at entry (x ATR)", minval=0.1, step=0.1, group="Trade quality")
 slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Trade quality")
 breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Trade quality")
 
@@ -55,7 +55,7 @@ showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
 showPosition = input.bool(true, "Draw position box on each signal", group="Display")
 posMinutes = input.int(60, "Position box length (minutes)", minval=5, group="Display")
 compactLabels = input.bool(false, "Compact labels (arrow only)", group="Display")
-showBlocked = input.bool(false, "Show blocked setups and why", group="Display")
+showBlocked = input.bool(true, "Show blocked setups and why", group="Display")
 
 atrV = ta.atr(14)
 volMA = ta.sma(volume, volLen)
@@ -135,16 +135,16 @@ chaseOkHigh = math.abs(close - rHigh) <= atrV * maxChaseAtr
 penOkLow = (rLow - low) >= atrV * minWickAtr
 penOkHigh = (high - rHigh) >= atrV * minWickAtr
 
-bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle) and chaseOkLow
-bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle) and chaseOkHigh
+bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle)
+bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle)
 bounceLowOk = bounceLowRaw and (not noBounceAfterBreak or not brokeDn)
 bounceHighOk = bounceHighRaw and (not noBounceAfterBreak or not brokeUp)
 
-breakDownRaw = close < rLow - atrV * minBreakAtr and close[1] >= rLow and (not reqDirCandle or bearCandle) and chaseOkLow
-breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not reqDirCandle or bullCandle) and chaseOkHigh
+breakDownRaw = close < rLow - atrV * minBreakAtr and close[1] >= rLow and (not reqDirCandle or bearCandle)
+breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not reqDirCandle or bullCandle)
 
-reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle) and chaseOkHigh
-reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle) and chaseOkLow
+reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle)
+reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle)
 
 // ── Order geometry: reject anything that cannot make a sane trade ─────────────
 f_rr(entry, tp, sl) =>
@@ -172,18 +172,28 @@ geomBuyReentry = f_okBuy(close, bbTp, bbSl)
 geomSellReentry = f_okSell(close, sbTp, sbSl)
 
 // Priority: re-entry > break > bounce, so one bar never emits two signals
-isBuyReentry = baseOk and useReentry and reentryLongRaw and geomBuyReentry
-isSellReentry = baseOk and useReentry and reentryShortRaw and geomSellReentry
-isBuyBreak = baseOk and useBreak and breakUpRaw and geomBuyBreak and not isBuyReentry and not isSellReentry
-isSellBreak = baseOk and useBreak and breakDownRaw and geomSellBreak and not isBuyReentry and not isSellReentry
-isBuyBounce = baseOk and useBounce and bounceLowOk and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
-isSellBounce = baseOk and useBounce and bounceHighOk and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isBuyReentry = baseOk and useReentry and reentryLongRaw and chaseOkLow and geomBuyReentry
+isSellReentry = baseOk and useReentry and reentryShortRaw and chaseOkHigh and geomSellReentry
+isBuyBreak = baseOk and useBreak and breakUpRaw and chaseOkHigh and geomBuyBreak and not isBuyReentry and not isSellReentry
+isSellBreak = baseOk and useBreak and breakDownRaw and chaseOkLow and geomSellBreak and not isBuyReentry and not isSellReentry
+isBuyBounce = baseOk and useBounce and bounceLowOk and chaseOkLow and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isSellBounce = baseOk and useBounce and bounceHighOk and chaseOkHigh and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
 
 buySignal = isBuyBounce or isBuyBreak or isBuyReentry
 sellSignal = isSellBounce or isSellBreak or isSellReentry
 
+// Patterns before ANY quality gate — these drive the diagnostic, so a setup
+// rejected by chase or R:R still gets reported instead of vanishing.
 rawBuy = (useBounce and bounceLowOk) or (useBreak and breakUpRaw) or (useReentry and reentryLongRaw)
 rawSell = (useBounce and bounceHighOk) or (useBreak and breakDownRaw) or (useReentry and reentryShortRaw)
+
+// Which level did this bar react to, and what would the trade have looked like
+distBuyAtr = (breakUpRaw ? math.abs(close - rHigh) : math.abs(close - rLow)) / math.max(atrV, 1e-9)
+distSellAtr = (breakDownRaw ? math.abs(close - rLow) : math.abs(close - rHigh)) / math.max(atrV, 1e-9)
+rrBuyVal = breakUpRaw ? f_rr(close, bkUpTp, bkUpSl) : f_rr(close, bbTp, bbSl)
+rrSellVal = breakDownRaw ? f_rr(close, bkDnTp, bkDnSl) : f_rr(close, sbTp, sbSl)
+distAtr = rawBuy ? distBuyAtr : distSellAtr
+rrVal = rawBuy ? rrBuyVal : rrSellVal
 
 if rSet and close < rLow
     brokeDn := true
@@ -233,7 +243,7 @@ if isSellBounce
 
 // ── Blocked setups: pattern found, something said no ──────────────────────────
 blocked = (rawBuy or rawSell) and not buySignal and not sellSignal and rSet and afterRange
-why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "poor R:R"
+why = not rangeWideEnough ? "range " + str.tostring(rangeHeight / math.max(atrV, 1e-9), "#.1") + "x ATR — too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : distAtr > maxChaseAtr ? "too far: " + str.tostring(distAtr, "#.1") + "x ATR" : "R:R " + str.tostring(rrVal, "#.2") + " too low"
 if showBlocked and blocked
     label.new(bar_index, rawBuy ? low : high, why, style=rawBuy ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
 
