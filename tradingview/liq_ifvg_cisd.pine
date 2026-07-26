@@ -21,7 +21,7 @@ indicator("Liquidity Sweep + IFVG + CISD", shorttitle="Liq+IFVG+CISD", overlay=t
 
 // ── Liquidity ─────────────────────────────────────────────────────────────────
 pivotLen = input.int(10, "Swing lookback for liquidity", minval=2, group="Liquidity")
-armBars = input.int(6, "Setup stays armed for (bars)", minval=1, group="Liquidity")
+armBars = input.int(12, "Setup stays armed for (bars)", minval=1, group="Liquidity")
 
 // ── CISD ──────────────────────────────────────────────────────────────────────
 minRunLen = input.int(2, "Min candles in the opposing run", minval=1, group="CISD")
@@ -43,7 +43,9 @@ showLiq = input.bool(true, "Live liquidity levels (max 2 on screen)", group="Cha
 showSweepMark = input.bool(true, "Mark the sweep", group="Chart")
 showIfvg = input.bool(true, "IFVG zones (inverted gaps only)", group="Chart")
 showFreshFvg = input.bool(false, "Also show fresh gaps — noisy", group="Chart")
-showCisdOnSignal = input.bool(true, "CISD level, only on a signal", group="Chart")
+showPending = input.bool(true, "Live CISD level while a setup is armed", group="Chart")
+showCisdOnSignal = input.bool(true, "CISD level on the signal itself", group="Chart")
+showPosBox = input.bool(true, "Shade the position (profit / risk)", group="Chart")
 tradeBars = input.int(30, "Entry / TP / SL line length (bars)", minval=5, group="Chart")
 showStats = input.bool(true, "Results table", group="Chart")
 
@@ -142,6 +144,24 @@ if isDn and isUp[1] and curUpLen >= minRunLen and not na(curUpOpen)
 
 cisdBull = not na(cisdBullLevel) and close > cisdBullLevel and close[1] <= cisdBullLevel
 cisdBear = not na(cisdBearLevel) and close < cisdBearLevel and close[1] >= cisdBearLevel
+
+// While a setup is armed, show the level price has to reclaim for the entry to
+// trigger. This is the part worth watching in advance; drawing CISD only after
+// the fact told you nothing you could act on.
+var line lnPend = na
+var label lbPend = na
+pendIsBull = bullArmed and not na(cisdBullLevel)
+pendIsBear = bearArmed and not na(cisdBearLevel)
+pendLvl = pendIsBull ? cisdBullLevel : pendIsBear ? cisdBearLevel : na
+
+if showPending
+    line.delete(lnPend)
+    label.delete(lbPend)
+    if not na(pendLvl)
+        pcol = pendIsBull ? color.teal : color.red
+        pFrom = pendIsBull ? armedBullBar : armedBearBar
+        lnPend := line.new(pFrom, pendLvl, bar_index + 4, pendLvl, color=color.new(pcol, 25), style=line.style_dotted, width=2)
+        lbPend := label.new(bar_index + 4, pendLvl, "CISD " + str.tostring(pendLvl, format.mintick), style=label.style_label_left, color=color.new(pcol, 55), textcolor=color.white, size=size.tiny)
 
 // ── Gaps: tracked always, drawn only once they invert into IFVGs ─────────────
 var array<float> fTop = array.new_float()
@@ -246,9 +266,12 @@ f_draw(isBuy, entry, tp, sl, cisdLvl) =>
     label.new(x2, entry, (isBuy ? "▲ BUY " : "▼ SELL ") + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(col, 15), textcolor=color.white, size=size.small)
     label.new(x2, tp, "TP " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.teal, 40), textcolor=color.white, size=size.tiny)
     label.new(x2, sl, "SL " + str.tostring(sl, format.mintick), style=label.style_label_left, color=color.new(color.red, 40), textcolor=color.white, size=size.tiny)
+    if showPosBox
+        box.new(x1, math.max(tp, entry), x2, math.min(tp, entry), border_color=color.new(color.teal, 80), bgcolor=color.new(color.teal, 90))
+        box.new(x1, math.max(entry, sl), x2, math.min(entry, sl), border_color=color.new(color.red, 80), bgcolor=color.new(color.red, 90))
     if showCisdOnSignal and not na(cisdLvl)
-        line.new(x1 - 4, cisdLvl, x1, cisdLvl, color=color.new(color.gray, 20), width=1)
-        label.new(x1 - 4, cisdLvl, "CISD", style=label.style_label_right, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
+        line.new(x1 - 10, cisdLvl, x1 + 2, cisdLvl, color=color.new(col, 0), style=line.style_dotted, width=2)
+        label.new(x1 - 10, cisdLvl, "CISD ✓ " + str.tostring(cisdLvl, format.mintick), style=label.style_label_right, color=color.new(col, 25), textcolor=color.white, size=size.tiny)
 
 if buySignal
     f_draw(true, close, buyTp, buySl, cisdBullLevel)
