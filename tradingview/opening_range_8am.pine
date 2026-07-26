@@ -1,0 +1,158 @@
+//@version=5
+// Opening Range (8am) — Bounce & Break Signals
+//
+// 1. Marks the 08:00 hourly candle and locks its HIGH and LOW.
+// 2. Draws both levels across the rest of the session.
+// 3. On the 1-minute chart, watches how price interacts with them:
+//      BOUNCE  — wicks through a level but closes back INSIDE the range
+//      BREAK   — closes OUTSIDE the level
+// 4. Fires signals:
+//      bounce off LOW   -> BUY,  TP = range high
+//      bounce off HIGH  -> SELL, TP = range low
+//      break below LOW  -> SELL, TP = measured move below
+//      break above HIGH -> BUY,  TP = measured move above
+//
+// Confirmation: volume above its average, and the signal candle must close
+// in the direction of the trade. Both can be switched off.
+//
+// TIMEZONE MATTERS: "8am" is meaningless without one. Set it below to the
+// 8am you actually mean, then check the drawn box lands on the right candle.
+//
+// Signals are evaluated on CLOSED bars. Set alerts to "Once Per Bar Close".
+
+indicator("Opening Range 8am — Bounce & Break", overlay=true, max_lines_count=200, max_labels_count=300, max_boxes_count=100)
+
+// ── Session ───────────────────────────────────────────────────────────────────
+tzIn = input.string("UTC", "Timezone", options=["UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Tokyo", "Australia/Sydney", "Europe/Berlin"], group="Range")
+rangeHour = input.int(8, "Range start hour", minval=0, maxval=23, group="Range")
+rangeMinutes = input.int(60, "Range length (minutes)", minval=5, group="Range")
+activeHours = input.int(8, "Stop signalling after (hours)", minval=1, maxval=24, group="Range")
+
+// ── Confirmation ──────────────────────────────────────────────────────────────
+useVol = input.bool(true, "Require above-average volume", group="Confirmation")
+volLen = input.int(20, "Volume average length", minval=2, group="Confirmation")
+volMult = input.float(1.2, "Volume must exceed average x", minval=0.5, step=0.1, group="Confirmation")
+reqDirCandle = input.bool(true, "Signal candle must close in trade direction", group="Confirmation")
+minWickAtr = input.float(0.05, "Min penetration beyond level (x ATR)", minval=0.0, step=0.05, group="Confirmation")
+noBounceAfterBreak = input.bool(true, "Ignore bounces off a level once it has broken", group="Confirmation")
+maxSignals = input.int(4, "Max signals per day (0 = unlimited)", minval=0, group="Confirmation")
+
+// ── Targets and stops ─────────────────────────────────────────────────────────
+breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
+slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Targets")
+showLevels = input.bool(true, "Shade the range", group="Display")
+
+atrV = ta.atr(14)
+volMA = ta.sma(volume, volLen)
+
+// ── Track the range window ────────────────────────────────────────────────────
+h = hour(time, tzIn)
+m = minute(time, tzIn)
+minsOfDay = h * 60 + m
+startMin = rangeHour * 60
+endMin = startMin + rangeMinutes
+inRange = minsOfDay >= startMin and minsOfDay < endMin
+afterRange = minsOfDay >= endMin and minsOfDay < endMin + activeHours * 60
+
+newDay = dayofmonth(time, tzIn) != dayofmonth(time[1], tzIn)
+
+var float rHigh = na
+var float rLow = na
+var bool rSet = false
+var bool brokeUp = false
+var bool brokeDn = false
+var int sigCount = 0
+var line lnHi = na
+var line lnLo = na
+var box bxRange = na
+
+if newDay
+    rHigh := na
+    rLow := na
+    rSet := false
+    brokeUp := false
+    brokeDn := false
+    sigCount := 0
+
+if inRange
+    rHigh := na(rHigh) ? high : math.max(rHigh, high)
+    rLow := na(rLow) ? low : math.min(rLow, low)
+
+rangeJustClosed = not inRange and inRange[1] and not na(rHigh) and not na(rLow)
+
+if rangeJustClosed
+    rSet := true
+    lnHi := line.new(bar_index, rHigh, bar_index + 1, rHigh, color=color.new(color.red, 0), width=2)
+    lnLo := line.new(bar_index, rLow, bar_index + 1, rLow, color=color.new(color.teal, 0), width=2)
+    if showLevels
+        bxRange := box.new(bar_index, rHigh, bar_index + 1, rLow, border_color=color.new(color.gray, 70), bgcolor=color.new(color.blue, 92))
+
+// Keep today's levels stretching to the current bar
+if rSet and not na(lnHi)
+    line.set_x2(lnHi, bar_index)
+    line.set_x2(lnLo, bar_index)
+    if showLevels and not na(bxRange)
+        box.set_right(bxRange, bar_index)
+
+// ── Interaction with the levels ───────────────────────────────────────────────
+canSignal = rSet and not inRange and afterRange and (maxSignals == 0 or sigCount < maxSignals)
+volOk = not useVol or volume > volMA * volMult
+bullCandle = close > open
+bearCandle = close < open
+
+penLow = rLow - low
+penHigh = high - rHigh
+penOkLow = penLow >= atrV * minWickAtr
+penOkHigh = penHigh >= atrV * minWickAtr
+
+// BOUNCE — wicked through, closed back inside
+bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle)
+bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle)
+
+// BREAK — closed outside, having been inside on the previous bar
+breakDownRaw = close < rLow and close[1] >= rLow and (not reqDirCandle or bearCandle)
+breakUpRaw = close > rHigh and close[1] <= rHigh and (not reqDirCandle or bullCandle)
+
+bounceLowOk = bounceLowRaw and (not noBounceAfterBreak or not brokeDn)
+bounceHighOk = bounceHighRaw and (not noBounceAfterBreak or not brokeUp)
+
+buySignal = canSignal and volOk and (bounceLowOk or breakUpRaw)
+sellSignal = canSignal and volOk and (bounceHighOk or breakDownRaw)
+
+isBuyBounce = canSignal and volOk and bounceLowOk
+isSellBounce = canSignal and volOk and bounceHighOk
+isBuyBreak = canSignal and volOk and breakUpRaw
+isSellBreak = canSignal and volOk and breakDownRaw
+
+if breakDownRaw and rSet
+    brokeDn := true
+if breakUpRaw and rSet
+    brokeUp := true
+
+// ── Targets, stops, labels ────────────────────────────────────────────────────
+rangeHeight = rHigh - rLow
+
+f_mark(isBuy, txt, entry, tp, sl) =>
+    sigCount := sigCount + 1
+    col = isBuy ? color.teal : color.red
+    yPos = isBuy ? low - atrV : high + atrV
+    label.new(bar_index, yPos, txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick), style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 15), textcolor=color.white, size=size.small)
+
+if isBuyBounce
+    f_mark(true, "BUY bounce", close, rHigh, rLow - atrV * slAtrBuf)
+if isSellBounce
+    f_mark(false, "SELL bounce", close, rLow, rHigh + atrV * slAtrBuf)
+if isBuyBreak
+    f_mark(true, "BUY break", close, rHigh + rangeHeight * breakTpMult, rHigh - atrV * slAtrBuf)
+if isSellBreak
+    f_mark(false, "SELL break", close, rLow - rangeHeight * breakTpMult, rLow + atrV * slAtrBuf)
+
+plotshape(isBuyBounce or isBuyBreak, "Buy", style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 0), size=size.tiny)
+plotshape(isSellBounce or isSellBreak, "Sell", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(isBuyBounce, "BUY bounce off range low", "BUY — bounced off opening-range LOW on {{ticker}} @ {{close}}")
+alertcondition(isSellBounce, "SELL bounce off range high", "SELL — bounced off opening-range HIGH on {{ticker}} @ {{close}}")
+alertcondition(isSellBreak, "SELL break below range low", "SELL — broke BELOW opening-range LOW on {{ticker}} @ {{close}}")
+alertcondition(isBuyBreak, "BUY break above range high", "BUY — broke ABOVE opening-range HIGH on {{ticker}} @ {{close}}")
+alertcondition(buySignal or sellSignal, "Any range signal", "Opening-range signal on {{ticker}} ({{interval}}) @ {{close}}")
