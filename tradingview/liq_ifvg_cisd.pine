@@ -39,6 +39,7 @@ slBufAtr = input.float(0.25, "Stop beyond sweep extreme (x ATR)", minval=0.0, st
 maxRiskAtr = input.float(1.5, "Cap risk at (x ATR from entry)", minval=0.3, step=0.1, group="Risk")
 rrMult = input.float(2.0, "Target = risk x", minval=0.5, step=0.5, group="Risk")
 cooldownBars = input.int(5, "Min bars between signals", minval=0, group="Risk")
+confirmedOnly = input.bool(true, "Only signal on closed candles", group="Risk", tooltip="On: a signal appears only once the candle closes, so it can never appear then vanish. Off: signals show live on the forming candle and may disappear if price pulls back before the close.")
 
 // ── What to draw — everything noisy is off by default ────────────────────────
 showLiq = input.bool(true, "Live liquidity levels (max 2 on screen)", group="Chart")
@@ -269,8 +270,11 @@ sellRisk = sellSl - close
 buyTp = close + buyRisk * rrMult
 sellTp = close - sellRisk * rrMult
 
-buyOk = rawBuy and buyRisk > 0
-sellOk = rawSell and sellRisk > 0
+// On the forming bar `close` is just the current price, so a live signal can
+// appear and then vanish if price pulls back before the candle closes.
+barOk = not confirmedOnly or barstate.isconfirmed
+buyOk = rawBuy and buyRisk > 0 and barOk
+sellOk = rawSell and sellRisk > 0 and barOk
 buySignal = buyOk and not sellOk
 sellSignal = sellOk and not buyOk
 
