@@ -7,11 +7,14 @@
 //      BOUNCE   — wicks through a level, closes back INSIDE  -> target opposite level
 //      BREAK    — closes DECISIVELY outside                  -> target measured move
 //      RE-ENTRY — broke out, failed, closed back INSIDE      -> target opposite level
-// 4. Draws ONE marker per signal, arrow included, so the direction shown can
-//    never disagree with the trade described. Optional position box.
+// 4. Every signal is validated BEFORE it fires:
+//      * entry must be on the correct side of both its stop and its target
+//      * reward:risk must reach minRR
+//      * price must not have run more than maxChase past the level (no chasing)
+//    A signal that cannot produce a sane order is never drawn.
 //
-// "Blocked setups" (grey dots) show where a pattern was detected but a filter
-// rejected it, and name the filter. Use it to tune rather than guess.
+// One marker per signal, arrow inside the label, R:R shown, so what is drawn
+// always matches the order described.
 //
 // Works on 1/5/15/30m. Signals evaluate on CLOSED bars — alerts "Once Per Bar Close".
 
@@ -28,7 +31,13 @@ useBounce = input.bool(true, "Bounce signals", group="Signals")
 useBreak = input.bool(true, "Breakout signals", group="Signals")
 useReentry = input.bool(true, "Failed-break re-entry signals (highest quality)", group="Signals")
 
-// ── Filters (loosen to get more signals, tighten to get fewer) ────────────────
+// ── Trade quality — these stop bad-geometry orders ────────────────────────────
+minRR = input.float(1.2, "Minimum reward:risk", minval=0.1, step=0.1, group="Trade quality")
+maxChaseAtr = input.float(0.6, "Max distance from level at entry (x ATR)", minval=0.1, step=0.1, group="Trade quality")
+slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Trade quality")
+breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Trade quality")
+
+// ── Filters ───────────────────────────────────────────────────────────────────
 useVol = input.bool(true, "Require above-average volume", group="Filters")
 volLen = input.int(20, "Volume average length", minval=2, group="Filters")
 volMult = input.float(1.0, "Volume must exceed average x", minval=0.5, step=0.1, group="Filters")
@@ -40,10 +49,6 @@ minRangeAtr = input.float(0.5, "Skip day if range smaller than (x ATR)", minval=
 cooldownBars = input.int(3, "Min bars between signals", minval=0, group="Filters")
 noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", group="Filters")
 maxSignals = input.int(6, "Max signals per day (0 = unlimited)", minval=0, group="Filters")
-
-// ── Targets and stops ─────────────────────────────────────────────────────────
-breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
-slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Targets")
 
 // ── Display ───────────────────────────────────────────────────────────────────
 showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
@@ -107,7 +112,7 @@ if rSet and not na(lnHi)
     line.set_x2(lnHi, bar_index)
     line.set_x2(lnLo, bar_index)
 
-// ── Filters ───────────────────────────────────────────────────────────────────
+// ── Shared filters ────────────────────────────────────────────────────────────
 rangeHeight = rHigh - rLow
 rangeWideEnough = not na(rangeHeight) and rangeHeight >= atrV * minRangeAtr
 
@@ -122,49 +127,76 @@ baseOk = rSet and not inRange and afterRange and rangeWideEnough and volOk and b
 bullCandle = close > open
 bearCandle = close < open
 
-// ── Interactions ──────────────────────────────────────────────────────────────
+// Do not chase: entry must still be near the level it reacted to
+chaseOkLow = math.abs(close - rLow) <= atrV * maxChaseAtr
+chaseOkHigh = math.abs(close - rHigh) <= atrV * maxChaseAtr
+
+// ── Patterns ──────────────────────────────────────────────────────────────────
 penOkLow = (rLow - low) >= atrV * minWickAtr
 penOkHigh = (high - rHigh) >= atrV * minWickAtr
 
-bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle)
-bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle)
+bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle) and chaseOkLow
+bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle) and chaseOkHigh
 bounceLowOk = bounceLowRaw and (not noBounceAfterBreak or not brokeDn)
 bounceHighOk = bounceHighRaw and (not noBounceAfterBreak or not brokeUp)
 
-breakDownRaw = close < rLow - atrV * minBreakAtr and close[1] >= rLow and (not reqDirCandle or bearCandle)
-breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not reqDirCandle or bullCandle)
+breakDownRaw = close < rLow - atrV * minBreakAtr and close[1] >= rLow and (not reqDirCandle or bearCandle) and chaseOkLow
+breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not reqDirCandle or bullCandle) and chaseOkHigh
 
-reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle)
-reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle)
+reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle) and chaseOkHigh
+reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle) and chaseOkLow
 
-// Raw patterns before the shared filters, used for the blocked-setup diagnostic
-rawBuy = (useBounce and bounceLowOk) or (useBreak and breakUpRaw) or (useReentry and reentryLongRaw)
-rawSell = (useBounce and bounceHighOk) or (useBreak and breakDownRaw) or (useReentry and reentryShortRaw)
+// ── Order geometry: reject anything that cannot make a sane trade ─────────────
+f_rr(entry, tp, sl) =>
+    risk = math.abs(entry - sl)
+    risk > 0 ? math.abs(tp - entry) / risk : 0.0
 
-// A single bar must not produce opposing signals: re-entry wins, then break,
-// then bounce. Direction is resolved ONCE and everything downstream uses it.
-isBuyReentry = baseOk and useReentry and reentryLongRaw
-isSellReentry = baseOk and useReentry and reentryShortRaw
-isBuyBreak = baseOk and useBreak and breakUpRaw and not isBuyReentry and not isSellReentry
-isSellBreak = baseOk and useBreak and breakDownRaw and not isBuyReentry and not isSellReentry
-isBuyBounce = baseOk and useBounce and bounceLowOk and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
-isSellBounce = baseOk and useBounce and bounceHighOk and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+f_okBuy(entry, tp, sl) => tp > entry and sl < entry and f_rr(entry, tp, sl) >= minRR
+f_okSell(entry, tp, sl) => tp < entry and sl > entry and f_rr(entry, tp, sl) >= minRR
+
+// Targets and stops per signal type
+bbTp = rHigh
+bbSl = rLow - atrV * slAtrBuf
+sbTp = rLow
+sbSl = rHigh + atrV * slAtrBuf
+bkUpTp = rHigh + rangeHeight * breakTpMult
+bkUpSl = rHigh - atrV * slAtrBuf
+bkDnTp = rLow - rangeHeight * breakTpMult
+bkDnSl = rLow + atrV * slAtrBuf
+
+geomBuyBounce = f_okBuy(close, bbTp, bbSl)
+geomSellBounce = f_okSell(close, sbTp, sbSl)
+geomBuyBreak = f_okBuy(close, bkUpTp, bkUpSl)
+geomSellBreak = f_okSell(close, bkDnTp, bkDnSl)
+geomBuyReentry = f_okBuy(close, bbTp, bbSl)
+geomSellReentry = f_okSell(close, sbTp, sbSl)
+
+// Priority: re-entry > break > bounce, so one bar never emits two signals
+isBuyReentry = baseOk and useReentry and reentryLongRaw and geomBuyReentry
+isSellReentry = baseOk and useReentry and reentryShortRaw and geomSellReentry
+isBuyBreak = baseOk and useBreak and breakUpRaw and geomBuyBreak and not isBuyReentry and not isSellReentry
+isSellBreak = baseOk and useBreak and breakDownRaw and geomSellBreak and not isBuyReentry and not isSellReentry
+isBuyBounce = baseOk and useBounce and bounceLowOk and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isSellBounce = baseOk and useBounce and bounceHighOk and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
 
 buySignal = isBuyBounce or isBuyBreak or isBuyReentry
 sellSignal = isSellBounce or isSellBreak or isSellReentry
+
+rawBuy = (useBounce and bounceLowOk) or (useBreak and breakUpRaw) or (useReentry and reentryLongRaw)
+rawSell = (useBounce and bounceHighOk) or (useBreak and breakDownRaw) or (useReentry and reentryShortRaw)
 
 if rSet and close < rLow
     brokeDn := true
 if rSet and close > rHigh
     brokeUp := true
 
-// ── Drawing — ONE marker per signal, arrow inside it ──────────────────────────
-// Pine forbids assigning to a global inside a function, so this only draws.
+// ── Drawing — one marker per signal ───────────────────────────────────────────
 f_mark(isBuy, txt, tp, sl) =>
     col = isBuy ? color.teal : color.red
     entry = close
+    rr = f_rr(entry, tp, sl)
     arrow = isBuy ? "▲ " : "▼ "
-    body = compactLabels ? arrow + (isBuy ? "BUY" : "SELL") : arrow + txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick)
+    body = compactLabels ? arrow + (isBuy ? "BUY" : "SELL") : arrow + txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick) + "\nR:R " + str.tostring(rr, "#.0")
     yPos = isBuy ? low - atrV * 0.6 : high + atrV * 0.6
     label.new(bar_index, yPos, body, style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 10), textcolor=color.white, size=size.small)
     if showPosition
@@ -175,33 +207,33 @@ f_mark(isBuy, txt, tp, sl) =>
         line.new(l, entry, r, entry, color=color.new(col, 0), width=1)
 
 if isBuyReentry
-    f_mark(true, "BUY failed break", rHigh, rLow - atrV * slAtrBuf)
+    f_mark(true, "BUY failed break", bbTp, bbSl)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 if isSellReentry
-    f_mark(false, "SELL failed break", rLow, rHigh + atrV * slAtrBuf)
+    f_mark(false, "SELL failed break", sbTp, sbSl)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 if isBuyBreak
-    f_mark(true, "BUY break", rHigh + rangeHeight * breakTpMult, rHigh - atrV * slAtrBuf)
+    f_mark(true, "BUY break", bkUpTp, bkUpSl)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 if isSellBreak
-    f_mark(false, "SELL break", rLow - rangeHeight * breakTpMult, rLow + atrV * slAtrBuf)
+    f_mark(false, "SELL break", bkDnTp, bkDnSl)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 if isBuyBounce
-    f_mark(true, "BUY bounce", rHigh, rLow - atrV * slAtrBuf)
+    f_mark(true, "BUY bounce", bbTp, bbSl)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 if isSellBounce
-    f_mark(false, "SELL bounce", rLow, rHigh + atrV * slAtrBuf)
+    f_mark(false, "SELL bounce", sbTp, sbSl)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 
-// ── Blocked setups: pattern found, filter said no ─────────────────────────────
+// ── Blocked setups: pattern found, something said no ──────────────────────────
 blocked = (rawBuy or rawSell) and not buySignal and not sellSignal and rSet and afterRange
-why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "filtered"
+why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "poor R:R"
 if showBlocked and blocked
     label.new(bar_index, rawBuy ? low : high, why, style=rawBuy ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
 
