@@ -1,0 +1,589 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+//
+// All-in-one chart toolkit, three modules in one indicator:
+//   1. OPENING RANGE (8am) — bounce / break / failed-break signals with
+//      position boxes, partial take-profit and a results table.
+//   2. SUPPORT / RESISTANCE — © BarsStallone, update by @christofferka.
+//      RSI + CMO + pivot based S/R lines, unchanged logic, renamed
+//      variables to avoid clashing with the other modules.
+//   3. SESSION LIQUIDITY — © Infinity_Trading_. Highs and lows of three
+//      configurable intraday sessions. Only draws on timeframes under 1h.
+//
+// Each module has its own on/off switch at the top of the settings, so you
+// can run just the parts you want without loading three separate scripts.
+//
+// Signals evaluate on CLOSED bars — set alerts to "Once Per Bar Close".
+
+//@version=5
+indicator("Opening Range + S/R + Session Liquidity", shorttitle="OR + S/R + Liq", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ── Module switches ───────────────────────────────────────────────────────────
+modOR = input.bool(true, "Opening-range signals", group="Modules")
+modSR = input.bool(true, "Support / Resistance lines", group="Modules")
+modLiq = input.bool(true, "Session liquidity lines", group="Modules")
+
+
+// ── Session ───────────────────────────────────────────────────────────────────
+tzIn = input.string("UTC", "Timezone", options=["UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Tokyo", "Australia/Sydney", "Europe/Berlin"], group="Range")
+rangeHour = input.int(8, "Range start hour", minval=0, maxval=23, group="Range")
+rangeMinutes = input.int(60, "Range length (minutes)", minval=5, group="Range")
+activeHours = input.int(14, "Stop signalling after (hours)", minval=1, maxval=24, group="Range")
+
+// ── Preset: sets every filter at once. Pick Custom to use the manual values ───
+preset = input.string("Loose", "Filter preset", options=["Loose", "Balanced", "Strict", "Custom"], group="Preset")
+
+// ── Which signals to take ─────────────────────────────────────────────────────
+useBounce = input.bool(true, "Bounce signals", group="Signals")
+useBreak = input.bool(true, "Breakout signals", group="Signals")
+useReentry = input.bool(true, "Failed-break re-entry signals", group="Signals")
+
+// ── Manual filters (used when preset = Custom) ────────────────────────────────
+cUseVol = input.bool(false, "Require above-average volume", group="Custom filters")
+volLen = input.int(20, "Volume average length", minval=2, group="Custom filters")
+cVolMult = input.float(1.2, "Volume must exceed average x", minval=0.5, step=0.1, group="Custom filters")
+cMinBody = input.float(0.0, "Min candle body (% of its range)", minval=0.0, maxval=100.0, step=5.0, group="Custom filters")
+cMinRR = input.float(0.8, "Minimum reward:risk", minval=0.1, step=0.1, group="Custom filters")
+cMaxRisk = input.float(1.5, "Cap stop distance at (x ATR)", minval=0.3, step=0.1, group="Custom filters")
+cCooldown = input.int(1, "Min bars between signals", minval=0, group="Custom filters")
+cMinRange = input.float(0.0, "Skip day if range smaller than (x ATR)", minval=0.0, step=0.25, group="Custom filters")
+cMaxSignals = input.int(8, "Max signals per day (0 = unlimited)", minval=0, group="Custom filters")
+
+reqDirCandle = input.bool(true, "Signal candle must close in trade direction", group="Custom filters")
+minWickAtr = input.float(0.05, "Bounce: min wick beyond level (x ATR)", minval=0.0, step=0.05, group="Custom filters")
+minBreakAtr = input.float(0.05, "Break: min close beyond level (x ATR)", minval=0.0, step=0.05, group="Custom filters")
+noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", group="Custom filters")
+
+// ── Targets ───────────────────────────────────────────────────────────────────
+slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Targets")
+breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
+trimAtPct = input.float(45.0, "Trim at % of the way to TP", minval=5.0, maxval=95.0, step=5.0, group="Targets")
+trimSizePct = input.float(50.0, "Trim this % of the position", minval=10.0, maxval=90.0, step=5.0, group="Targets")
+beAfterTrim = input.bool(true, "Move stop to breakeven after trim", group="Targets")
+
+useHtf = input.bool(false, "Only trade with the higher-timeframe trend", group="Trend filter")
+htfTf = input.timeframe("240", "Higher timeframe", group="Trend filter")
+htfEmaLen = input.int(50, "HTF EMA length", minval=2, group="Trend filter")
+
+showStats = input.bool(true, "Show results table", group="Display")
+
+// ── Display ───────────────────────────────────────────────────────────────────
+showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
+showPosition = input.bool(true, "Draw position box on each signal", group="Display")
+posMinutes = input.int(60, "Position box length (minutes)", minval=5, group="Display")
+compactLabels = input.bool(false, "Compact labels (arrow only)", group="Display")
+showBlocked = input.bool(true, "Show blocked setups and why", group="Display")
+
+// ── Resolve the preset ────────────────────────────────────────────────────────
+isCustom = preset == "Custom"
+isLoose = preset == "Loose"
+isBal = preset == "Balanced"
+isStrict = preset == "Strict"
+
+useVol = isCustom ? cUseVol : isStrict
+volMult = isCustom ? cVolMult : 1.2
+minBodyPct = isCustom ? cMinBody : isLoose ? 0.0 : isBal ? 20.0 : 35.0
+minRR = isCustom ? cMinRR : isLoose ? 0.8 : isBal ? 1.0 : 1.5
+maxRiskAtr = isCustom ? cMaxRisk : isLoose ? 2.0 : isBal ? 1.5 : 1.0
+cooldownBars = isCustom ? cCooldown : isLoose ? 1 : isBal ? 3 : 5
+minRangeAtr = isCustom ? cMinRange : isLoose ? 0.0 : isBal ? 0.5 : 1.0
+maxSignals = isCustom ? cMaxSignals : isLoose ? 8 : isBal ? 6 : 4
+
+atrV = ta.atr(14)
+volMA = ta.sma(volume, volLen)
+posBars = math.max(3, int(posMinutes / math.max(timeframe.multiplier, 1)))
+
+// ── Range window ──────────────────────────────────────────────────────────────
+curHour = hour(time, tzIn)
+curMin = minute(time, tzIn)
+minsOfDay = curHour * 60 + curMin
+startMin = rangeHour * 60
+endMin = startMin + rangeMinutes
+inRange = minsOfDay >= startMin and minsOfDay < endMin
+afterRange = minsOfDay >= endMin and minsOfDay < endMin + activeHours * 60
+
+newDay = dayofmonth(time, tzIn) != dayofmonth(time[1], tzIn)
+
+var float rHigh = na
+var float rLow = na
+var bool rSet = false
+var bool brokeUp = false
+var bool brokeDn = false
+var int sigCount = 0
+var int lastSigBar = -9999
+var int rStartBar = na
+var line lnHi = na
+var line lnLo = na
+var box bxRange = na
+
+if newDay
+    rHigh := na
+    rLow := na
+    rSet := false
+    brokeUp := false
+    brokeDn := false
+    sigCount := 0
+
+if inRange and not inRange[1]
+    rStartBar := bar_index
+
+if inRange
+    rHigh := na(rHigh) ? high : math.max(rHigh, high)
+    rLow := na(rLow) ? low : math.min(rLow, low)
+
+rangeJustClosed = not inRange and inRange[1] and not na(rHigh) and not na(rLow)
+
+if rangeJustClosed
+    rSet := true
+    lnHi := line.new(rStartBar, rHigh, bar_index, rHigh, color=color.new(color.red, 0), width=2)
+    lnLo := line.new(rStartBar, rLow, bar_index, rLow, color=color.new(color.teal, 0), width=2)
+    if showLevels and modOR
+        bxRange := box.new(rStartBar, rHigh, bar_index, rLow, border_color=color.new(color.gray, 60), bgcolor=color.new(color.blue, 88))
+
+if rSet and not na(lnHi)
+    line.set_x2(lnHi, bar_index)
+    line.set_x2(lnLo, bar_index)
+
+// ── Shared filters ────────────────────────────────────────────────────────────
+rangeHeight = rHigh - rLow
+rangeWideEnough = not na(rangeHeight) and (minRangeAtr <= 0 or rangeHeight >= atrV * minRangeAtr)
+
+barRng = high - low
+bodyOk = minBodyPct <= 0 or (barRng > 0 and math.abs(close - open) / barRng >= minBodyPct / 100)
+volOk = not useVol or volume > volMA * volMult
+cooled = bar_index - lastSigBar >= cooldownBars
+underCap = maxSignals == 0 or sigCount < maxSignals
+
+baseOk = modOR and rSet and not inRange and afterRange and rangeWideEnough and volOk and bodyOk and cooled and underCap
+
+bullCandle = close > open
+bearCandle = close < open
+
+// Higher-timeframe trend gate (previous completed HTF bar -> no repainting)
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_on)
+htfBuyOk = not useHtf or close > htfEma
+htfSellOk = not useHtf or close < htfEma
+
+// ── Patterns ──────────────────────────────────────────────────────────────────
+penOkLow = (rLow - low) >= atrV * minWickAtr
+penOkHigh = (high - rHigh) >= atrV * minWickAtr
+
+bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle)
+bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle)
+bounceLowOk = bounceLowRaw and (not noBounceAfterBreak or not brokeDn)
+bounceHighOk = bounceHighRaw and (not noBounceAfterBreak or not brokeUp)
+
+breakDownRaw = close < rLow - atrV * minBreakAtr and close[1] >= rLow and (not reqDirCandle or bearCandle)
+breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not reqDirCandle or bullCandle)
+
+reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle)
+reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle)
+
+// ── Order geometry ────────────────────────────────────────────────────────────
+// The stop is CAPPED at maxRisk ATR from entry rather than always sitting back
+// at the level. A huge breakout candle therefore yields a tradeable order
+// instead of a rejected one, which is what "no signals during a strong trend"
+// was really about.
+f_rr(entry, tp, sl) =>
+    risk = math.abs(entry - sl)
+    risk > 0 ? math.abs(tp - entry) / risk : 0.0
+
+f_okBuy(entry, tp, sl) => tp > entry and sl < entry and f_rr(entry, tp, sl) >= minRR
+f_okSell(entry, tp, sl) => tp < entry and sl > entry and f_rr(entry, tp, sl) >= minRR
+
+riskCap = atrV * maxRiskAtr
+
+bbTp = rHigh
+bbSl = math.max(rLow - atrV * slAtrBuf, close - riskCap)
+sbTp = rLow
+sbSl = math.min(rHigh + atrV * slAtrBuf, close + riskCap)
+// Break targets project from the ENTRY so reward does not shrink as price runs
+bkUpTp = close + rangeHeight * breakTpMult
+bkUpSl = math.max(rHigh - atrV * slAtrBuf, close - riskCap)
+bkDnTp = close - rangeHeight * breakTpMult
+bkDnSl = math.min(rLow + atrV * slAtrBuf, close + riskCap)
+
+geomBuyBounce = f_okBuy(close, bbTp, bbSl)
+geomSellBounce = f_okSell(close, sbTp, sbSl)
+geomBuyBreak = f_okBuy(close, bkUpTp, bkUpSl)
+geomSellBreak = f_okSell(close, bkDnTp, bkDnSl)
+
+// Priority: re-entry > break > bounce, so one bar never emits two signals
+isBuyReentry = baseOk and htfBuyOk and useReentry and reentryLongRaw and geomBuyBounce
+isSellReentry = baseOk and htfSellOk and useReentry and reentryShortRaw and geomSellBounce
+isBuyBreak = baseOk and htfBuyOk and useBreak and breakUpRaw and geomBuyBreak and not isBuyReentry and not isSellReentry
+isSellBreak = baseOk and htfSellOk and useBreak and breakDownRaw and geomSellBreak and not isBuyReentry and not isSellReentry
+isBuyBounce = baseOk and htfBuyOk and useBounce and bounceLowOk and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isSellBounce = baseOk and htfSellOk and useBounce and bounceHighOk and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+
+buySignal = isBuyBounce or isBuyBreak or isBuyReentry
+sellSignal = isSellBounce or isSellBreak or isSellReentry
+
+rawBuy = (useBounce and bounceLowOk) or (useBreak and breakUpRaw) or (useReentry and reentryLongRaw)
+rawSell = (useBounce and bounceHighOk) or (useBreak and breakDownRaw) or (useReentry and reentryShortRaw)
+rrBuyVal = breakUpRaw ? f_rr(close, bkUpTp, bkUpSl) : f_rr(close, bbTp, bbSl)
+rrSellVal = breakDownRaw ? f_rr(close, bkDnTp, bkDnSl) : f_rr(close, sbTp, sbSl)
+rrVal = rawBuy ? rrBuyVal : rrSellVal
+
+if rSet and close < rLow
+    brokeDn := true
+if rSet and close > rHigh
+    brokeUp := true
+
+// ── Drawing ───────────────────────────────────────────────────────────────────
+f_mark(isBuy, txt, tp, sl) =>
+    col = isBuy ? color.teal : color.red
+    entry = close
+    rr = f_rr(entry, tp, sl)
+    arrow = isBuy ? "▲ " : "▼ "
+    body = compactLabels ? arrow + (isBuy ? "BUY" : "SELL") : arrow + txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick) + "\nR:R " + str.tostring(rr, "#.0")
+    yPos = isBuy ? low - atrV * 0.6 : high + atrV * 0.6
+    label.new(bar_index, yPos, body, style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 10), textcolor=color.white, size=size.small)
+    if showPosition
+        bx1 = bar_index
+        bx2 = bar_index + posBars
+        box.new(bx1, math.max(tp, entry), bx2, math.min(tp, entry), border_color=color.new(color.teal, 70), bgcolor=color.new(color.teal, 88))
+        box.new(bx1, math.max(entry, sl), bx2, math.min(entry, sl), border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 88))
+        line.new(bx1, entry, bx2, entry, color=color.new(col, 0), width=1)
+        trimPx = entry + (tp - entry) * trimAtPct / 100
+        line.new(bx1, trimPx, bx2, trimPx, color=color.new(color.orange, 20), style=line.style_dotted, width=1)
+        label.new(bx2, trimPx, "Trim " + str.tostring(trimSizePct, "#") + "%", style=label.style_label_left, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
+
+if isBuyReentry
+    f_mark(true, "BUY failed break", bbTp, bbSl)
+    sigCount := sigCount + 1
+    lastSigBar := bar_index
+if isSellReentry
+    f_mark(false, "SELL failed break", sbTp, sbSl)
+    sigCount := sigCount + 1
+    lastSigBar := bar_index
+if isBuyBreak
+    f_mark(true, "BUY break", bkUpTp, bkUpSl)
+    sigCount := sigCount + 1
+    lastSigBar := bar_index
+if isSellBreak
+    f_mark(false, "SELL break", bkDnTp, bkDnSl)
+    sigCount := sigCount + 1
+    lastSigBar := bar_index
+if isBuyBounce
+    f_mark(true, "BUY bounce", bbTp, bbSl)
+    sigCount := sigCount + 1
+    lastSigBar := bar_index
+if isSellBounce
+    f_mark(false, "SELL bounce", sbTp, sbSl)
+    sigCount := sigCount + 1
+    lastSigBar := bar_index
+
+// ── Blocked setups ────────────────────────────────────────────────────────────
+blocked = (rawBuy or rawSell) and not buySignal and not sellSignal and rSet and afterRange
+why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "R:R " + str.tostring(rrVal, "#.2")
+if showBlocked and modOR and blocked
+    label.new(bar_index, rawBuy ? low : high, why, style=rawBuy ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
+
+// ── Trade tracking: follow each signal to its outcome and score it in R ──────
+// One position at a time, which is how it would actually be traded. A trade
+// that never reaches its target and gets stopped is a loss; one that runs out
+// of session is closed at market and scored on what it actually made.
+var bool inTrade = false
+var bool tIsBuy = false
+var float tEntry = na
+var float tSl = na
+var float tTp = na
+var float tTrim = na
+var float tRisk = na
+var bool tTrimmed = false
+var int tBar = na
+var int nTrades = 0
+var int nWins = 0
+var int nLosses = 0
+var int nExpired = 0
+var int nTrimHit = 0
+var float sumR = 0.0
+
+newSignal = buySignal or sellSignal
+if newSignal and not inTrade
+    inTrade := true
+    tIsBuy := buySignal
+    tEntry := close
+    tSl := isBuyReentry or isBuyBounce ? bbSl : isSellReentry or isSellBounce ? sbSl : isBuyBreak ? bkUpSl : bkDnSl
+    tTp := isBuyReentry or isBuyBounce ? bbTp : isSellReentry or isSellBounce ? sbTp : isBuyBreak ? bkUpTp : bkDnTp
+    tTrim := tEntry + (tTp - tEntry) * trimAtPct / 100
+    tRisk := math.abs(tEntry - tSl)
+    tTrimmed := false
+    tBar := bar_index
+    nTrades := nTrades + 1
+
+if inTrade and bar_index > tBar
+    trimFrac = trimSizePct / 100
+    fullR = tRisk > 0 ? math.abs(tTp - tEntry) / tRisk : 0.0
+    trimR = fullR * trimAtPct / 100
+    // Stop is checked before target: assume the adverse move came first
+    hitSl = tIsBuy ? low <= tSl : high >= tSl
+    hitTp = tIsBuy ? high >= tTp : low <= tTp
+    hitTrim = tIsBuy ? high >= tTrim : low <= tTrim
+
+    if hitTrim and not tTrimmed and not hitSl
+        tTrimmed := true
+        nTrimHit := nTrimHit + 1
+        if beAfterTrim
+            tSl := tEntry
+
+    if hitSl
+        // Stopped. If already trimmed, the banked partial still counts.
+        rNow = tTrimmed ? trimFrac * trimR + (1 - trimFrac) * (tSl == tEntry ? 0.0 : -1.0) : -1.0
+        sumR := sumR + rNow
+        if rNow > 0
+            nWins := nWins + 1
+        else
+            nLosses := nLosses + 1
+        inTrade := false
+    else if hitTp
+        rNow = tTrimmed ? trimFrac * trimR + (1 - trimFrac) * fullR : fullR
+        sumR := sumR + rNow
+        nWins := nWins + 1
+        inTrade := false
+    else if newDay or not afterRange
+        // Session over and the trade never resolved — close it out and score it
+        moved = tIsBuy ? close - tEntry : tEntry - close
+        rNow = tRisk > 0 ? moved / tRisk : 0.0
+        rNow := tTrimmed ? trimFrac * trimR + (1 - trimFrac) * rNow : rNow
+        sumR := sumR + rNow
+        nExpired := nExpired + 1
+        if rNow > 0
+            nWins := nWins + 1
+        else
+            nLosses := nLosses + 1
+        inTrade := false
+
+// ── Results table ─────────────────────────────────────────────────────────────
+var table stats = na
+if showStats and modOR and barstate.islast
+    table.delete(stats)
+    stats := table.new(position.top_right, 2, 7, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    winPct = nTrades > 0 ? nWins / nTrades * 100 : 0.0
+    trimPct2 = nTrades > 0 ? nTrimHit / nTrades * 100 : 0.0
+    expectancy = nTrades > 0 ? sumR / nTrades : 0.0
+    netCol = sumR > 0 ? color.teal : color.red
+    table.cell(stats, 0, 0, "RESULTS", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(stats, 1, 0, "", bgcolor=color.new(color.black, 70))
+    table.cell(stats, 0, 1, "Trades", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 1, str.tostring(nTrades), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 2, "Win rate", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 2, str.tostring(winPct, "#.0") + "%", text_color=winPct >= 50 ? color.teal : color.orange, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 3, "W / L", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 3, str.tostring(nWins) + " / " + str.tostring(nLosses), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 4, "Trim hit", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 4, str.tostring(trimPct2, "#.0") + "%", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 5, "Unresolved", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 5, str.tostring(nExpired), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 6, "Net R / avg", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(stats, 1, 6, str.tostring(sumR, "#.1") + "R / " + str.tostring(expectancy, "#.2") + "R", text_color=netCol, bgcolor=color.new(color.black, 70), text_size=size.small)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(isBuyReentry, "BUY failed break", "BUY — failed breakdown, back inside range on {{ticker}} @ {{close}}")
+alertcondition(isSellReentry, "SELL failed break", "SELL — failed breakout, back inside range on {{ticker}} @ {{close}}")
+alertcondition(isBuyBreak, "BUY break", "BUY — broke ABOVE range HIGH on {{ticker}} @ {{close}}")
+alertcondition(isSellBreak, "SELL break", "SELL — broke BELOW range LOW on {{ticker}} @ {{close}}")
+alertcondition(isBuyBounce, "BUY bounce", "BUY — bounced off range LOW on {{ticker}} @ {{close}}")
+alertcondition(isSellBounce, "SELL bounce", "SELL — bounced off range HIGH on {{ticker}} @ {{close}}")
+alertcondition(buySignal, "Any BUY", "BUY signal on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(sellSignal, "Any SELL", "SELL signal on {{ticker}} ({{interval}}) @ {{close}}")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODULE 2 — SUPPORT / RESISTANCE     © BarsStallone, update @christofferka
+// Original logic preserved; identifiers prefixed sr* so they cannot collide
+// with the opening-range or session-liquidity modules.
+// ═══════════════════════════════════════════════════════════════════════════
+srLineWidth = input.int(3, "S/R line width", minval=1, maxval=10, group="Support / Resistance")
+srTf = input.timeframe("", title="S/R timeframe", group="Support / Resistance")
+
+srRsiSrc = close
+srLen = 9
+srUp1 = ta.rma(math.max(ta.change(srRsiSrc), 0), srLen)
+srDown1 = ta.rma(-math.min(ta.change(srRsiSrc), 0), srLen)
+
+// CMO based on HMA
+srLength1 = 1
+srSrc1 = ta.hma(open, 5)[1]
+srSrc2 = ta.hma(close, 12)
+srMomm1 = ta.change(srSrc1)
+srMomm2 = ta.change(srSrc2)
+srF1(m, n) => m >= n ? m : 0.0
+srF2(m, n) => m >= n ? 0.0 : -m
+srM1 = srF1(srMomm1, srMomm2)
+srM2 = srF2(srMomm1, srMomm2)
+srSm1 = math.sum(srM1, srLength1)
+srSm2 = math.sum(srM2, srLength1)
+srPercent(nom, div) => 100 * nom / div
+srCmo = srPercent(srSm1 - srSm2, srSm1 + srSm2)
+
+// Close pivots
+srLen5 = 2
+srHighest = ta.highest(srLen5)
+srH1 = ta.dev(srHighest, srLen5) ? na : srHighest
+srHpivot = fixnan(srH1)
+srLowest = ta.lowest(srLen5)
+srL1 = ta.dev(srLowest, srLen5) ? na : srLowest
+srLpivot = fixnan(srL1)
+
+srRsi = ta.rsi(close, 9)
+srSup = srRsi < 25 and srCmo > 50 and srLpivot
+srRes = srRsi > 75 and srCmo < -50 and srHpivot
+
+srCalcXup() =>
+    var xup = 0.0
+    xup := srSup ? low : xup[1]
+    xup
+srCalcXdown() =>
+    var xdown = 0.0
+    xdown := srRes ? high : xdown[1]
+    xdown
+
+srTf1 = request.security(syminfo.tickerid, srTf, srCalcXup(), lookahead=barmerge.lookahead_on)
+srTf2 = request.security(syminfo.tickerid, srTf, srCalcXdown(), lookahead=barmerge.lookahead_on)
+
+var line srLine1 = na
+var int srBi1Start = 0
+var int srBi1End = 0
+srBi1Start := ta.change(srTf1) ? bar_index : srBi1Start[1]
+srBi1End := ta.change(srTf1) ? srBi1Start : bar_index
+if modSR and ta.change(srTf1)
+    srLine1 := line.new(srBi1Start, srTf1, srBi1End, srTf1, color=color.green, width=srLineWidth)
+if modSR and not na(srLine1)
+    line.set_x2(srLine1, srBi1End)
+
+var line srLine2 = na
+var int srBi2Start = 0
+var int srBi2End = 0
+srBi2Start := ta.change(srTf2) ? bar_index : srBi2Start[1]
+srBi2End := ta.change(srTf2) ? srBi2Start : bar_index
+if modSR and ta.change(srTf2)
+    srLine2 := line.new(srBi2Start, srTf2, srBi2End, srTf2, color=color.orange, width=srLineWidth)
+if modSR and not na(srLine2)
+    line.set_x2(srLine2, srBi2End)
+
+alertcondition(ta.change(srTf1) != 0 or ta.change(srTf2) != 0, title="New S/R line", message="New S/R line")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODULE 3 — SESSION LIQUIDITY                          © Infinity_Trading_
+// Draws the high and low of up to three intraday sessions. Intraday only,
+// and only on timeframes below 1 hour, as in the original.
+// ═══════════════════════════════════════════════════════════════════════════
+liqMsInDay = 24 * 60 * 60 * 1000
+liqTip1 = "If nothing changes when you adjust this, you are stepping across a weekend or holiday. Keep clicking."
+liqTip2 = "Sessions restart at midnight of the timezone chosen here. Pick the zone your session sits in."
+liqTip3 = "Start and end must fall within the same day of the chosen timezone."
+
+liqDaysBack = input.int(15, "Show only this many days back", minval=1, maxval=80, group="Session Liquidity", tooltip=liqTip1)
+
+var string LQ1 = "Session 1"
+liq1Hi = input.bool(true, "High line", group=LQ1, inline="h1")
+liq1HiLbl = input.bool(true, "High label", group=LQ1, inline="h1")
+liq1Lo = input.bool(true, "Low line", group=LQ1, inline="l1")
+liq1LoLbl = input.bool(true, "Low label", group=LQ1, inline="l1")
+liq1Day = input.string("Asia/Shanghai", "Start day timezone", options=["America/New_York", "Europe/London", "Asia/Shanghai"], group=LQ1, tooltip=liqTip2)
+liq1Time = input.session("1900-0259", "Start & end", group=LQ1, tooltip=liqTip3)
+liq1Text = input.string("Asia", "Label", group=LQ1, inline="t1")
+liq1TextCol = input.color(color.new(#787b86, 0), "", group=LQ1, inline="t1")
+liq1HiCol = input.color(color.new(#00bcd4, 0), "High colour", group=LQ1, inline="c1")
+liq1LoCol = input.color(color.new(#00bcd4, 0), "Low colour", group=LQ1, inline="c1")
+liq1Width = input.int(2, "Width", minval=1, maxval=10, group=LQ1)
+
+var string LQ2 = "Session 2"
+liq2Hi = input.bool(true, "High line", group=LQ2, inline="h2")
+liq2HiLbl = input.bool(true, "High label", group=LQ2, inline="h2")
+liq2Lo = input.bool(true, "Low line", group=LQ2, inline="l2")
+liq2LoLbl = input.bool(true, "Low label", group=LQ2, inline="l2")
+liq2Day = input.string("Europe/London", "Start day timezone", options=["America/New_York", "Europe/London", "Asia/Shanghai"], group=LQ2, tooltip=liqTip2)
+liq2Time = input.session("0300-0929", "Start & end", group=LQ2, tooltip=liqTip3)
+liq2Text = input.string("London", "Label", group=LQ2, inline="t2")
+liq2TextCol = input.color(color.new(#787b86, 0), "", group=LQ2, inline="t2")
+liq2HiCol = input.color(color.new(#f2a03a, 0), "High colour", group=LQ2, inline="c2")
+liq2LoCol = input.color(color.new(#f2a03a, 0), "Low colour", group=LQ2, inline="c2")
+liq2Width = input.int(2, "Width", minval=1, maxval=10, group=LQ2)
+
+var string LQ3 = "Session 3"
+liq3Hi = input.bool(false, "High line", group=LQ3, inline="h3")
+liq3HiLbl = input.bool(false, "High label", group=LQ3, inline="h3")
+liq3Lo = input.bool(false, "Low line", group=LQ3, inline="l3")
+liq3LoLbl = input.bool(false, "Low label", group=LQ3, inline="l3")
+liq3Day = input.string("America/New_York", "Start day timezone", options=["America/New_York", "Europe/London", "Asia/Shanghai"], group=LQ3, tooltip=liqTip2)
+liq3Time = input.session("0930-1559", "Start & end", group=LQ3, tooltip=liqTip3)
+liq3Text = input.string("New York", "Label", group=LQ3, inline="t3")
+liq3TextCol = input.color(color.new(#787b86, 0), "", group=LQ3, inline="t3")
+liq3HiCol = input.color(color.new(#467deb, 0), "High colour", group=LQ3, inline="c3")
+liq3LoCol = input.color(color.new(#467deb, 0), "Low colour", group=LQ3, inline="c3")
+liq3Width = input.int(2, "Width", minval=1, maxval=10, group=LQ3)
+
+liqNewDay1 = dayofmonth(time, liq1Day) != dayofmonth(time, liq1Day)[1] and timeframe.isintraday
+liqNewDay2 = dayofmonth(time, liq2Day) != dayofmonth(time, liq2Day)[1] and timeframe.isintraday
+liqNewDay3 = dayofmonth(time, liq3Day) != dayofmonth(time, liq3Day)[1] and timeframe.isintraday
+
+liqLastBar = timestamp(year(timenow), month(timenow), dayofmonth(timenow), hour(timenow), minute(timenow), second(timenow))
+liqThisBar = timestamp(year, month, dayofmonth, hour, minute, second)
+liqDaysLeft = math.floor((liqLastBar - liqThisBar) / liqMsInDay)
+liqInRange = liqDaysLeft < liqDaysBack
+
+liqSessionLines(HI_ON, LO_ON, HI_LBL, LO_LBL, SESS, DAYS_OK, NEW_DAY, HI_COL, LO_COL, WID, TXT_COL, TXT) =>
+    sessWindow = time(timeframe.period, SESS, "America/New_York")
+    startHour = str.substring(SESS, 0, 2)
+    startMins = str.substring(SESS, 2, 4)
+    startNow = (hour(time, "America/New_York") == str.tonumber(startHour)) and (minute(time) == str.tonumber(startMins))
+
+    var float sHigh = 0.0
+    var float sLow = 0.0
+    var line lnHiL = na
+    var line lnLoL = na
+    var label lbHi = na
+    var label lbLo = na
+    offset = ta.stdev(close, 10) / 2
+
+    if DAYS_OK and timeframe.isminutes and timeframe.multiplier < 60
+        if NEW_DAY
+            if HI_ON
+                lnHiL := line.new(x1=na, y1=na, x2=na, y2=na, color=HI_COL, style=line.style_solid, width=WID)
+            if LO_ON
+                lnLoL := line.new(x1=na, y1=na, x2=na, y2=na, color=LO_COL, style=line.style_solid, width=WID)
+            int dummy1 = 5
+        else
+            if startNow
+                sHigh := high
+                sLow := low
+                if HI_ON
+                    line.set_x1(lnHiL, bar_index)
+                    line.set_y1(lnHiL, sHigh)
+                    line.set_x2(lnHiL, bar_index + 1)
+                    line.set_y2(lnHiL, sHigh)
+                if LO_ON
+                    line.set_x1(lnLoL, bar_index)
+                    line.set_y1(lnLoL, sLow)
+                    line.set_x2(lnLoL, bar_index + 1)
+                    line.set_y2(lnLoL, sLow)
+            if sessWindow
+                sHigh := math.max(sHigh, high)
+                sLow := math.min(sLow, low)
+                if HI_ON
+                    line.set_y1(lnHiL, sHigh)
+                    line.set_x2(lnHiL, bar_index + 1)
+                    line.set_y2(lnHiL, sHigh)
+                if LO_ON
+                    line.set_y1(lnLoL, sLow)
+                    line.set_x2(lnLoL, bar_index + 1)
+                    line.set_y2(lnLoL, sLow)
+                xMid = (line.get_x2(lnLoL) - line.get_x1(lnLoL)) / 2
+                if HI_LBL
+                    pHi = line.get_price(lnHiL, bar_index)
+                    lbHi := label.new(x=bar_index - xMid, y=pHi, text=TXT, xloc=xloc.bar_index, color=color.new(#131722, 100), textcolor=TXT_COL, tooltip=str.tostring(pHi), size=size.small)
+                    label.delete(lbHi[1])
+                if LO_LBL
+                    pLo = line.get_price(lnLoL, bar_index)
+                    lbLo := label.new(x=bar_index - xMid, y=pLo - offset, text=TXT, xloc=xloc.bar_index, color=color.new(#131722, 100), textcolor=TXT_COL, tooltip=str.tostring(pLo), size=size.small)
+                    label.delete(lbLo[1])
+            int dummy2 = 6
+
+if modLiq
+    liqSessionLines(liq1Hi, liq1Lo, liq1HiLbl, liq1LoLbl, liq1Time, liqInRange, liqNewDay1, liq1HiCol, liq1LoCol, liq1Width, liq1TextCol, liq1Text)
+    liqSessionLines(liq2Hi, liq2Lo, liq2HiLbl, liq2LoLbl, liq2Time, liqInRange, liqNewDay2, liq2HiCol, liq2LoCol, liq2Width, liq2TextCol, liq2Text)
+    liqSessionLines(liq3Hi, liq3Lo, liq3HiLbl, liq3LoLbl, liq3Time, liqInRange, liqNewDay3, liq3HiCol, liq3LoCol, liq3Width, liq3TextCol, liq3Text)
