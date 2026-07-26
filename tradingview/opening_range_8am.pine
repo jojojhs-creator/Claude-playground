@@ -132,20 +132,25 @@ if breakUpRaw and rSet
 // ── Targets, stops, labels ────────────────────────────────────────────────────
 rangeHeight = rHigh - rLow
 
-f_mark(isBuy, txt, entry, tp, sl) =>
-    sigCount := sigCount + 1
+// Pine forbids assigning to a global from inside a function, so f_mark only
+// draws; the signal counter is incremented at global scope by each caller.
+f_mark(isBuy, txt, tp, sl) =>
     col = isBuy ? color.teal : color.red
     yPos = isBuy ? low - atrV : high + atrV
     label.new(bar_index, yPos, txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick), style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 15), textcolor=color.white, size=size.small)
 
 if isBuyBounce
-    f_mark(true, "BUY bounce", close, rHigh, rLow - atrV * slAtrBuf)
+    f_mark(true, "BUY bounce", rHigh, rLow - atrV * slAtrBuf)
+    sigCount := sigCount + 1
 if isSellBounce
-    f_mark(false, "SELL bounce", close, rLow, rHigh + atrV * slAtrBuf)
+    f_mark(false, "SELL bounce", rLow, rHigh + atrV * slAtrBuf)
+    sigCount := sigCount + 1
 if isBuyBreak
-    f_mark(true, "BUY break", close, rHigh + rangeHeight * breakTpMult, rHigh - atrV * slAtrBuf)
+    f_mark(true, "BUY break", rHigh + rangeHeight * breakTpMult, rHigh - atrV * slAtrBuf)
+    sigCount := sigCount + 1
 if isSellBreak
-    f_mark(false, "SELL break", close, rLow - rangeHeight * breakTpMult, rLow + atrV * slAtrBuf)
+    f_mark(false, "SELL break", rLow - rangeHeight * breakTpMult, rLow + atrV * slAtrBuf)
+    sigCount := sigCount + 1
 
 plotshape(isBuyBounce or isBuyBreak, "Buy", style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 0), size=size.tiny)
 plotshape(isSellBounce or isSellBreak, "Sell", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
