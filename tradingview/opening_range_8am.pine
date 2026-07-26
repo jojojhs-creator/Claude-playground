@@ -1,20 +1,19 @@
 //@version=5
 // Opening Range (8am) — Bounce, Break & Failed-Break Signals
 //
-// 1. Locks the HIGH and LOW of the 08:00 hourly candle and shades that hour.
-// 2. Extends both levels across the session.
-// 3. Reads how price interacts with them:
-//      BOUNCE   — wicks through a level, closes back INSIDE  -> target opposite level
-//      BREAK    — closes DECISIVELY outside                  -> target measured move
-//      RE-ENTRY — broke out, failed, closed back INSIDE      -> target opposite level
-// 4. Every signal is validated BEFORE it fires:
-//      * entry must be on the correct side of both its stop and its target
-//      * reward:risk must reach minRR
-//      * price must not have run more than maxChase past the level (no chasing)
-//    A signal that cannot produce a sane order is never drawn.
+// Locks the HIGH/LOW of the 08:00 hourly candle, extends both levels, and
+// signals on how price interacts with them:
+//   BOUNCE   — wicks through a level, closes back INSIDE  -> target opposite level
+//   BREAK    — closes DECISIVELY outside                  -> target measured move
+//   RE-ENTRY — broke out, failed, closed back INSIDE      -> target opposite level
 //
-// One marker per signal, arrow inside the label, R:R shown, so what is drawn
-// always matches the order described.
+// Risk is CAPPED rather than signals being rejected. On a large breakout candle
+// the stop is placed at most maxRisk ATR away instead of all the way back at the
+// level, so a strong trending move still produces a tradeable order instead of
+// being discarded for "chasing". Break targets project from the entry, so the
+// reward does not shrink as the entry runs.
+//
+// Start on the Loose preset. Tighten only if you see too many bad signals.
 //
 // Works on 1/5/15/30m. Signals evaluate on CLOSED bars — alerts "Once Per Bar Close".
 
@@ -24,31 +23,35 @@ indicator("Opening Range 8am — Bounce, Break & Failed Break", overlay=true, ma
 tzIn = input.string("UTC", "Timezone", options=["UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Tokyo", "Australia/Sydney", "Europe/Berlin"], group="Range")
 rangeHour = input.int(8, "Range start hour", minval=0, maxval=23, group="Range")
 rangeMinutes = input.int(60, "Range length (minutes)", minval=5, group="Range")
-activeHours = input.int(12, "Stop signalling after (hours)", minval=1, maxval=24, group="Range")
+activeHours = input.int(14, "Stop signalling after (hours)", minval=1, maxval=24, group="Range")
+
+// ── Preset: sets every filter at once. Pick Custom to use the manual values ───
+preset = input.string("Loose", "Filter preset", options=["Loose", "Balanced", "Strict", "Custom"], group="Preset")
 
 // ── Which signals to take ─────────────────────────────────────────────────────
 useBounce = input.bool(true, "Bounce signals", group="Signals")
 useBreak = input.bool(true, "Breakout signals", group="Signals")
-useReentry = input.bool(true, "Failed-break re-entry signals (highest quality)", group="Signals")
+useReentry = input.bool(true, "Failed-break re-entry signals", group="Signals")
 
-// ── Trade quality — these stop bad-geometry orders ────────────────────────────
-minRR = input.float(1.0, "Minimum reward:risk", minval=0.1, step=0.1, group="Trade quality")
-maxChaseAtr = input.float(1.5, "Max distance from level at entry (x ATR)", minval=0.1, step=0.1, group="Trade quality")
-slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Trade quality")
-breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Trade quality")
+// ── Manual filters (used when preset = Custom) ────────────────────────────────
+cUseVol = input.bool(false, "Require above-average volume", group="Custom filters")
+volLen = input.int(20, "Volume average length", minval=2, group="Custom filters")
+cVolMult = input.float(1.2, "Volume must exceed average x", minval=0.5, step=0.1, group="Custom filters")
+cMinBody = input.float(0.0, "Min candle body (% of its range)", minval=0.0, maxval=100.0, step=5.0, group="Custom filters")
+cMinRR = input.float(0.8, "Minimum reward:risk", minval=0.1, step=0.1, group="Custom filters")
+cMaxRisk = input.float(1.5, "Cap stop distance at (x ATR)", minval=0.3, step=0.1, group="Custom filters")
+cCooldown = input.int(1, "Min bars between signals", minval=0, group="Custom filters")
+cMinRange = input.float(0.0, "Skip day if range smaller than (x ATR)", minval=0.0, step=0.25, group="Custom filters")
+cMaxSignals = input.int(8, "Max signals per day (0 = unlimited)", minval=0, group="Custom filters")
 
-// ── Filters ───────────────────────────────────────────────────────────────────
-useVol = input.bool(true, "Require above-average volume", group="Filters")
-volLen = input.int(20, "Volume average length", minval=2, group="Filters")
-volMult = input.float(1.0, "Volume must exceed average x", minval=0.5, step=0.1, group="Filters")
-reqDirCandle = input.bool(true, "Signal candle must close in trade direction", group="Filters")
-minBodyPct = input.float(25.0, "Min candle body (% of its range)", minval=0.0, maxval=100.0, step=5.0, group="Filters")
-minWickAtr = input.float(0.05, "Bounce: min wick beyond level (x ATR)", minval=0.0, step=0.05, group="Filters")
-minBreakAtr = input.float(0.10, "Break: min close beyond level (x ATR)", minval=0.0, step=0.05, group="Filters")
-minRangeAtr = input.float(0.5, "Skip day if range smaller than (x ATR)", minval=0.0, step=0.25, group="Filters")
-cooldownBars = input.int(3, "Min bars between signals", minval=0, group="Filters")
-noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", group="Filters")
-maxSignals = input.int(6, "Max signals per day (0 = unlimited)", minval=0, group="Filters")
+reqDirCandle = input.bool(true, "Signal candle must close in trade direction", group="Custom filters")
+minWickAtr = input.float(0.05, "Bounce: min wick beyond level (x ATR)", minval=0.0, step=0.05, group="Custom filters")
+minBreakAtr = input.float(0.05, "Break: min close beyond level (x ATR)", minval=0.0, step=0.05, group="Custom filters")
+noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", group="Custom filters")
+
+// ── Targets ───────────────────────────────────────────────────────────────────
+slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Targets")
+breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
 
 // ── Display ───────────────────────────────────────────────────────────────────
 showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
@@ -56,6 +59,21 @@ showPosition = input.bool(true, "Draw position box on each signal", group="Displ
 posMinutes = input.int(60, "Position box length (minutes)", minval=5, group="Display")
 compactLabels = input.bool(false, "Compact labels (arrow only)", group="Display")
 showBlocked = input.bool(true, "Show blocked setups and why", group="Display")
+
+// ── Resolve the preset ────────────────────────────────────────────────────────
+isCustom = preset == "Custom"
+isLoose = preset == "Loose"
+isBal = preset == "Balanced"
+isStrict = preset == "Strict"
+
+useVol = isCustom ? cUseVol : isStrict
+volMult = isCustom ? cVolMult : 1.2
+minBodyPct = isCustom ? cMinBody : isLoose ? 0.0 : isBal ? 20.0 : 35.0
+minRR = isCustom ? cMinRR : isLoose ? 0.8 : isBal ? 1.0 : 1.5
+maxRiskAtr = isCustom ? cMaxRisk : isLoose ? 2.0 : isBal ? 1.5 : 1.0
+cooldownBars = isCustom ? cCooldown : isLoose ? 1 : isBal ? 3 : 5
+minRangeAtr = isCustom ? cMinRange : isLoose ? 0.0 : isBal ? 0.5 : 1.0
+maxSignals = isCustom ? cMaxSignals : isLoose ? 8 : isBal ? 6 : 4
 
 atrV = ta.atr(14)
 volMA = ta.sma(volume, volLen)
@@ -114,10 +132,10 @@ if rSet and not na(lnHi)
 
 // ── Shared filters ────────────────────────────────────────────────────────────
 rangeHeight = rHigh - rLow
-rangeWideEnough = not na(rangeHeight) and rangeHeight >= atrV * minRangeAtr
+rangeWideEnough = not na(rangeHeight) and (minRangeAtr <= 0 or rangeHeight >= atrV * minRangeAtr)
 
 barRng = high - low
-bodyOk = barRng > 0 and math.abs(close - open) / barRng >= minBodyPct / 100
+bodyOk = minBodyPct <= 0 or (barRng > 0 and math.abs(close - open) / barRng >= minBodyPct / 100)
 volOk = not useVol or volume > volMA * volMult
 cooled = bar_index - lastSigBar >= cooldownBars
 underCap = maxSignals == 0 or sigCount < maxSignals
@@ -126,10 +144,6 @@ baseOk = rSet and not inRange and afterRange and rangeWideEnough and volOk and b
 
 bullCandle = close > open
 bearCandle = close < open
-
-// Do not chase: entry must still be near the level it reacted to
-chaseOkLow = math.abs(close - rLow) <= atrV * maxChaseAtr
-chaseOkHigh = math.abs(close - rHigh) <= atrV * maxChaseAtr
 
 // ── Patterns ──────────────────────────────────────────────────────────────────
 penOkLow = (rLow - low) >= atrV * minWickAtr
@@ -146,7 +160,11 @@ breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not r
 reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle)
 reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle)
 
-// ── Order geometry: reject anything that cannot make a sane trade ─────────────
+// ── Order geometry ────────────────────────────────────────────────────────────
+// The stop is CAPPED at maxRisk ATR from entry rather than always sitting back
+// at the level. A huge breakout candle therefore yields a tradeable order
+// instead of a rejected one, which is what "no signals during a strong trend"
+// was really about.
 f_rr(entry, tp, sl) =>
     risk = math.abs(entry - sl)
     risk > 0 ? math.abs(tp - entry) / risk : 0.0
@@ -154,45 +172,38 @@ f_rr(entry, tp, sl) =>
 f_okBuy(entry, tp, sl) => tp > entry and sl < entry and f_rr(entry, tp, sl) >= minRR
 f_okSell(entry, tp, sl) => tp < entry and sl > entry and f_rr(entry, tp, sl) >= minRR
 
-// Targets and stops per signal type
+riskCap = atrV * maxRiskAtr
+
 bbTp = rHigh
-bbSl = rLow - atrV * slAtrBuf
+bbSl = math.max(rLow - atrV * slAtrBuf, close - riskCap)
 sbTp = rLow
-sbSl = rHigh + atrV * slAtrBuf
-bkUpTp = rHigh + rangeHeight * breakTpMult
-bkUpSl = rHigh - atrV * slAtrBuf
-bkDnTp = rLow - rangeHeight * breakTpMult
-bkDnSl = rLow + atrV * slAtrBuf
+sbSl = math.min(rHigh + atrV * slAtrBuf, close + riskCap)
+// Break targets project from the ENTRY so reward does not shrink as price runs
+bkUpTp = close + rangeHeight * breakTpMult
+bkUpSl = math.max(rHigh - atrV * slAtrBuf, close - riskCap)
+bkDnTp = close - rangeHeight * breakTpMult
+bkDnSl = math.min(rLow + atrV * slAtrBuf, close + riskCap)
 
 geomBuyBounce = f_okBuy(close, bbTp, bbSl)
 geomSellBounce = f_okSell(close, sbTp, sbSl)
 geomBuyBreak = f_okBuy(close, bkUpTp, bkUpSl)
 geomSellBreak = f_okSell(close, bkDnTp, bkDnSl)
-geomBuyReentry = f_okBuy(close, bbTp, bbSl)
-geomSellReentry = f_okSell(close, sbTp, sbSl)
 
 // Priority: re-entry > break > bounce, so one bar never emits two signals
-isBuyReentry = baseOk and useReentry and reentryLongRaw and chaseOkLow and geomBuyReentry
-isSellReentry = baseOk and useReentry and reentryShortRaw and chaseOkHigh and geomSellReentry
-isBuyBreak = baseOk and useBreak and breakUpRaw and chaseOkHigh and geomBuyBreak and not isBuyReentry and not isSellReentry
-isSellBreak = baseOk and useBreak and breakDownRaw and chaseOkLow and geomSellBreak and not isBuyReentry and not isSellReentry
-isBuyBounce = baseOk and useBounce and bounceLowOk and chaseOkLow and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
-isSellBounce = baseOk and useBounce and bounceHighOk and chaseOkHigh and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isBuyReentry = baseOk and useReentry and reentryLongRaw and geomBuyBounce
+isSellReentry = baseOk and useReentry and reentryShortRaw and geomSellBounce
+isBuyBreak = baseOk and useBreak and breakUpRaw and geomBuyBreak and not isBuyReentry and not isSellReentry
+isSellBreak = baseOk and useBreak and breakDownRaw and geomSellBreak and not isBuyReentry and not isSellReentry
+isBuyBounce = baseOk and useBounce and bounceLowOk and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isSellBounce = baseOk and useBounce and bounceHighOk and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
 
 buySignal = isBuyBounce or isBuyBreak or isBuyReentry
 sellSignal = isSellBounce or isSellBreak or isSellReentry
 
-// Patterns before ANY quality gate — these drive the diagnostic, so a setup
-// rejected by chase or R:R still gets reported instead of vanishing.
 rawBuy = (useBounce and bounceLowOk) or (useBreak and breakUpRaw) or (useReentry and reentryLongRaw)
 rawSell = (useBounce and bounceHighOk) or (useBreak and breakDownRaw) or (useReentry and reentryShortRaw)
-
-// Which level did this bar react to, and what would the trade have looked like
-distBuyAtr = (breakUpRaw ? math.abs(close - rHigh) : math.abs(close - rLow)) / math.max(atrV, 1e-9)
-distSellAtr = (breakDownRaw ? math.abs(close - rLow) : math.abs(close - rHigh)) / math.max(atrV, 1e-9)
 rrBuyVal = breakUpRaw ? f_rr(close, bkUpTp, bkUpSl) : f_rr(close, bbTp, bbSl)
 rrSellVal = breakDownRaw ? f_rr(close, bkDnTp, bkDnSl) : f_rr(close, sbTp, sbSl)
-distAtr = rawBuy ? distBuyAtr : distSellAtr
 rrVal = rawBuy ? rrBuyVal : rrSellVal
 
 if rSet and close < rLow
@@ -200,7 +211,7 @@ if rSet and close < rLow
 if rSet and close > rHigh
     brokeUp := true
 
-// ── Drawing — one marker per signal ───────────────────────────────────────────
+// ── Drawing ───────────────────────────────────────────────────────────────────
 f_mark(isBuy, txt, tp, sl) =>
     col = isBuy ? color.teal : color.red
     entry = close
@@ -241,9 +252,9 @@ if isSellBounce
     sigCount := sigCount + 1
     lastSigBar := bar_index
 
-// ── Blocked setups: pattern found, something said no ──────────────────────────
+// ── Blocked setups ────────────────────────────────────────────────────────────
 blocked = (rawBuy or rawSell) and not buySignal and not sellSignal and rSet and afterRange
-why = not rangeWideEnough ? "range " + str.tostring(rangeHeight / math.max(atrV, 1e-9), "#.1") + "x ATR — too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : distAtr > maxChaseAtr ? "too far: " + str.tostring(distAtr, "#.1") + "x ATR" : "R:R " + str.tostring(rrVal, "#.2") + " too low"
+why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "R:R " + str.tostring(rrVal, "#.2")
 if showBlocked and blocked
     label.new(bar_index, rawBuy ? low : high, why, style=rawBuy ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
 
