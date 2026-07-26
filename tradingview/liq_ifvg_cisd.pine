@@ -20,7 +20,9 @@
 indicator("Liquidity Sweep + IFVG + CISD", shorttitle="Liq+IFVG+CISD", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ── Liquidity ─────────────────────────────────────────────────────────────────
-pivotLen = input.int(10, "Swing lookback for liquidity", minval=2, group="Liquidity")
+pivotLen = input.int(8, "Swing lookback for liquidity", minval=2, group="Liquidity")
+maxPools = input.int(6, "Liquidity pools tracked per side", minval=1, maxval=20, group="Liquidity")
+requireCloseBack = input.bool(false, "Sweep candle must also close back inside", group="Liquidity", tooltip="Off by default. CISD is already the reversal confirmation, so demanding rejection on the sweep candle too means almost nothing fires in a trend.")
 armBars = input.int(12, "Setup stays armed for (bars)", minval=1, group="Liquidity")
 
 // ── CISD ──────────────────────────────────────────────────────────────────────
@@ -51,64 +53,81 @@ showStats = input.bool(true, "Results table", group="Chart")
 
 atrV = ta.atr(14)
 
-// ── Liquidity pools — only the live ones stay on the chart ───────────────────
+// ── Liquidity pools — several tracked per side, each usable once ─────────────
 ph = ta.pivothigh(high, pivotLen, pivotLen)
 pl = ta.pivotlow(low, pivotLen, pivotLen)
 
-var float liqHigh = na
-var float liqLow = na
-var bool liqHighUsed = true
-var bool liqLowUsed = true
-var line lnLiqHi = na
-var line lnLiqLo = na
+var array<float> poolHi = array.new_float()
+var array<float> poolLo = array.new_float()
+var array<line> poolHiLn = array.new_line()
+var array<line> poolLoLn = array.new_line()
 
-if not na(ph)
-    liqHigh := ph
-    // Pivots confirm pivotLen bars late; if price already traded through the
-    // level during that lag the pool is gone before we ever learn about it.
-    liqHighUsed := ta.highest(high, pivotLen) > ph
-    line.delete(lnLiqHi)
-    if showLiq and not liqHighUsed
-        lnLiqHi := line.new(bar_index - pivotLen, ph, bar_index, ph, color=color.new(color.red, 45), style=line.style_dashed, width=1)
+// A pivot confirms pivotLen bars late; if price already traded through the
+// level in that window the pool is gone before we could ever use it.
+if not na(ph) and ta.highest(high, pivotLen) <= ph
+    array.push(poolHi, ph)
+    array.push(poolHiLn, showLiq ? line.new(bar_index - pivotLen, ph, bar_index, ph, color=color.new(color.red, 55), style=line.style_dashed, width=1) : na)
+    while array.size(poolHi) > maxPools
+        dl = array.shift(poolHiLn)
+        if not na(dl)
+            line.delete(dl)
+        array.shift(poolHi)
 
-if not na(pl)
-    liqLow := pl
-    liqLowUsed := ta.lowest(low, pivotLen) < pl
-    line.delete(lnLiqLo)
-    if showLiq and not liqLowUsed
-        lnLiqLo := line.new(bar_index - pivotLen, pl, bar_index, pl, color=color.new(color.teal, 45), style=line.style_dashed, width=1)
+if not na(pl) and ta.lowest(low, pivotLen) >= pl
+    array.push(poolLo, pl)
+    array.push(poolLoLn, showLiq ? line.new(bar_index - pivotLen, pl, bar_index, pl, color=color.new(color.teal, 55), style=line.style_dashed, width=1) : na)
+    while array.size(poolLo) > maxPools
+        dl2 = array.shift(poolLoLn)
+        if not na(dl2)
+            line.delete(dl2)
+        array.shift(poolLo)
 
-// Keep the live levels reaching the current bar
-if not liqHighUsed and not na(lnLiqHi)
-    line.set_x2(lnLiqHi, bar_index)
-if not liqLowUsed and not na(lnLiqLo)
-    line.set_x2(lnLiqLo, bar_index)
-
-sweptLow = not na(liqLow) and not liqLowUsed and low < liqLow and close > liqLow
-sweptHigh = not na(liqHigh) and not liqHighUsed and high > liqHigh and close < liqHigh
-
-var int armedBullBar = -9999
+// Any untouched pool can be swept, not just the newest one
+sweptHigh = false
+sweptLow = false
+var float sweepHighPx = na
 var float sweepLowPx = na
 var int armedBearBar = -9999
-var float sweepHighPx = na
+var int armedBullBar = -9999
 
-if sweptLow
-    liqLowUsed := true
-    armedBullBar := bar_index
-    sweepLowPx := low
-    line.delete(lnLiqLo)
-    if showSweepMark
-        line.new(bar_index - 1, liqLow, bar_index + 1, liqLow, color=color.new(color.teal, 0), width=2)
-        label.new(bar_index, low, "SWEEP", style=label.style_label_up, color=color.new(color.teal, 25), textcolor=color.white, size=size.tiny)
+if array.size(poolHi) > 0
+    for i = array.size(poolHi) - 1 to 0
+        if i < array.size(poolHi)
+            lvl = array.get(poolHi, i)
+            if high > lvl and (not requireCloseBack or close < lvl)
+                sweptHigh := true
+                sweepHighPx := high
+                dl3 = array.get(poolHiLn, i)
+                if not na(dl3)
+                    line.delete(dl3)
+                array.remove(poolHi, i)
+                array.remove(poolHiLn, i)
+            else if not na(array.get(poolHiLn, i))
+                line.set_x2(array.get(poolHiLn, i), bar_index)
+
+if array.size(poolLo) > 0
+    for j = array.size(poolLo) - 1 to 0
+        if j < array.size(poolLo)
+            lvl2 = array.get(poolLo, j)
+            if low < lvl2 and (not requireCloseBack or close > lvl2)
+                sweptLow := true
+                sweepLowPx := low
+                dl4 = array.get(poolLoLn, j)
+                if not na(dl4)
+                    line.delete(dl4)
+                array.remove(poolLo, j)
+                array.remove(poolLoLn, j)
+            else if not na(array.get(poolLoLn, j))
+                line.set_x2(array.get(poolLoLn, j), bar_index)
 
 if sweptHigh
-    liqHighUsed := true
     armedBearBar := bar_index
-    sweepHighPx := high
-    line.delete(lnLiqHi)
     if showSweepMark
-        line.new(bar_index - 1, liqHigh, bar_index + 1, liqHigh, color=color.new(color.red, 0), width=2)
         label.new(bar_index, high, "SWEEP", style=label.style_label_down, color=color.new(color.red, 25), textcolor=color.white, size=size.tiny)
+if sweptLow
+    armedBullBar := bar_index
+    if showSweepMark
+        label.new(bar_index, low, "SWEEP", style=label.style_label_up, color=color.new(color.teal, 25), textcolor=color.white, size=size.tiny)
 
 bullArmed = bar_index - armedBullBar <= armBars
 bearArmed = bar_index - armedBearBar <= armBars
