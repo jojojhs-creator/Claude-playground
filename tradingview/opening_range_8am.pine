@@ -52,6 +52,15 @@ noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", gro
 // ── Targets ───────────────────────────────────────────────────────────────────
 slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Targets")
 breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
+trimAtPct = input.float(45.0, "Trim at % of the way to TP", minval=5.0, maxval=95.0, step=5.0, group="Targets")
+trimSizePct = input.float(50.0, "Trim this % of the position", minval=10.0, maxval=90.0, step=5.0, group="Targets")
+beAfterTrim = input.bool(true, "Move stop to breakeven after trim", group="Targets")
+
+useHtf = input.bool(false, "Only trade with the higher-timeframe trend", group="Trend filter")
+htfTf = input.timeframe("240", "Higher timeframe", group="Trend filter")
+htfEmaLen = input.int(50, "HTF EMA length", minval=2, group="Trend filter")
+
+showStats = input.bool(true, "Show results table", group="Display")
 
 // ── Display ───────────────────────────────────────────────────────────────────
 showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
@@ -145,6 +154,11 @@ baseOk = rSet and not inRange and afterRange and rangeWideEnough and volOk and b
 bullCandle = close > open
 bearCandle = close < open
 
+// Higher-timeframe trend gate (previous completed HTF bar -> no repainting)
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_on)
+htfBuyOk = not useHtf or close > htfEma
+htfSellOk = not useHtf or close < htfEma
+
 // ── Patterns ──────────────────────────────────────────────────────────────────
 penOkLow = (rLow - low) >= atrV * minWickAtr
 penOkHigh = (high - rHigh) >= atrV * minWickAtr
@@ -190,12 +204,12 @@ geomBuyBreak = f_okBuy(close, bkUpTp, bkUpSl)
 geomSellBreak = f_okSell(close, bkDnTp, bkDnSl)
 
 // Priority: re-entry > break > bounce, so one bar never emits two signals
-isBuyReentry = baseOk and useReentry and reentryLongRaw and geomBuyBounce
-isSellReentry = baseOk and useReentry and reentryShortRaw and geomSellBounce
-isBuyBreak = baseOk and useBreak and breakUpRaw and geomBuyBreak and not isBuyReentry and not isSellReentry
-isSellBreak = baseOk and useBreak and breakDownRaw and geomSellBreak and not isBuyReentry and not isSellReentry
-isBuyBounce = baseOk and useBounce and bounceLowOk and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
-isSellBounce = baseOk and useBounce and bounceHighOk and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isBuyReentry = baseOk and htfBuyOk and useReentry and reentryLongRaw and geomBuyBounce
+isSellReentry = baseOk and htfSellOk and useReentry and reentryShortRaw and geomSellBounce
+isBuyBreak = baseOk and htfBuyOk and useBreak and breakUpRaw and geomBuyBreak and not isBuyReentry and not isSellReentry
+isSellBreak = baseOk and htfSellOk and useBreak and breakDownRaw and geomSellBreak and not isBuyReentry and not isSellReentry
+isBuyBounce = baseOk and htfBuyOk and useBounce and bounceLowOk and geomBuyBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isSellBounce = baseOk and htfSellOk and useBounce and bounceHighOk and geomSellBounce and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
 
 buySignal = isBuyBounce or isBuyBreak or isBuyReentry
 sellSignal = isSellBounce or isSellBreak or isSellReentry
@@ -226,6 +240,9 @@ f_mark(isBuy, txt, tp, sl) =>
         box.new(l, math.max(tp, entry), r, math.min(tp, entry), border_color=color.new(color.teal, 70), bgcolor=color.new(color.teal, 88))
         box.new(l, math.max(entry, sl), r, math.min(entry, sl), border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 88))
         line.new(l, entry, r, entry, color=color.new(col, 0), width=1)
+        trimPx = entry + (tp - entry) * trimAtPct / 100
+        line.new(l, trimPx, r, trimPx, color=color.new(color.orange, 20), style=line.style_dotted, width=1)
+        label.new(r, trimPx, "Trim " + str.tostring(trimSizePct, "#") + "%", style=label.style_label_left, color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
 
 if isBuyReentry
     f_mark(true, "BUY failed break", bbTp, bbSl)
@@ -257,6 +274,105 @@ blocked = (rawBuy or rawSell) and not buySignal and not sellSignal and rSet and 
 why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "R:R " + str.tostring(rrVal, "#.2")
 if showBlocked and blocked
     label.new(bar_index, rawBuy ? low : high, why, style=rawBuy ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
+
+// ── Trade tracking: follow each signal to its outcome and score it in R ──────
+// One position at a time, which is how it would actually be traded. A trade
+// that never reaches its target and gets stopped is a loss; one that runs out
+// of session is closed at market and scored on what it actually made.
+var bool inTrade = false
+var bool tIsBuy = false
+var float tEntry = na
+var float tSl = na
+var float tTp = na
+var float tTrim = na
+var float tRisk = na
+var bool tTrimmed = false
+var int tBar = na
+var int nTrades = 0
+var int nWins = 0
+var int nLosses = 0
+var int nExpired = 0
+var int nTrimHit = 0
+var float sumR = 0.0
+
+newSignal = buySignal or sellSignal
+if newSignal and not inTrade
+    inTrade := true
+    tIsBuy := buySignal
+    tEntry := close
+    tSl := isBuyReentry or isBuyBounce ? bbSl : isSellReentry or isSellBounce ? sbSl : isBuyBreak ? bkUpSl : bkDnSl
+    tTp := isBuyReentry or isBuyBounce ? bbTp : isSellReentry or isSellBounce ? sbTp : isBuyBreak ? bkUpTp : bkDnTp
+    tTrim := tEntry + (tTp - tEntry) * trimAtPct / 100
+    tRisk := math.abs(tEntry - tSl)
+    tTrimmed := false
+    tBar := bar_index
+    nTrades := nTrades + 1
+
+if inTrade and bar_index > tBar
+    trimFrac = trimSizePct / 100
+    fullR = tRisk > 0 ? math.abs(tTp - tEntry) / tRisk : 0.0
+    trimR = fullR * trimAtPct / 100
+    // Stop is checked before target: assume the adverse move came first
+    hitSl = tIsBuy ? low <= tSl : high >= tSl
+    hitTp = tIsBuy ? high >= tTp : low <= tTp
+    hitTrim = tIsBuy ? high >= tTrim : low <= tTrim
+
+    if hitTrim and not tTrimmed and not hitSl
+        tTrimmed := true
+        nTrimHit := nTrimHit + 1
+        if beAfterTrim
+            tSl := tEntry
+
+    if hitSl
+        // Stopped. If already trimmed, the banked partial still counts.
+        rNow = tTrimmed ? trimFrac * trimR + (1 - trimFrac) * (tSl == tEntry ? 0.0 : -1.0) : -1.0
+        sumR := sumR + rNow
+        if rNow > 0
+            nWins := nWins + 1
+        else
+            nLosses := nLosses + 1
+        inTrade := false
+    else if hitTp
+        rNow = tTrimmed ? trimFrac * trimR + (1 - trimFrac) * fullR : fullR
+        sumR := sumR + rNow
+        nWins := nWins + 1
+        inTrade := false
+    else if newDay or not afterRange
+        // Session over and the trade never resolved — close it out and score it
+        moved = tIsBuy ? close - tEntry : tEntry - close
+        rNow = tRisk > 0 ? moved / tRisk : 0.0
+        rNow := tTrimmed ? trimFrac * trimR + (1 - trimFrac) * rNow : rNow
+        sumR := sumR + rNow
+        nExpired := nExpired + 1
+        if rNow > 0
+            nWins := nWins + 1
+        else
+            nLosses := nLosses + 1
+        inTrade := false
+
+// ── Results table ─────────────────────────────────────────────────────────────
+var table stats = na
+if showStats and barstate.islast
+    table.delete(stats)
+    stats := table.new(position.top_right, 2, 7, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    winPct = nTrades > 0 ? nWins / nTrades * 100 : 0.0
+    trimPct2 = nTrades > 0 ? nTrimHit / nTrades * 100 : 0.0
+    expectancy = nTrades > 0 ? sumR / nTrades : 0.0
+    netCol = sumR > 0 ? color.teal : color.red
+    table.cell(stats, 0, 0, "RESULTS", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(stats, 1, 0, "", bgcolor=color.new(color.black, 70))
+    table.cell(stats, 0, 1, "Trades", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 1, str.tostring(nTrades), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 2, "Win rate", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 2, str.tostring(winPct, "#.0") + "%", text_color=winPct >= 50 ? color.teal : color.orange, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 3, "W / L", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 3, str.tostring(nWins) + " / " + str.tostring(nLosses), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 4, "Trim hit", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 4, str.tostring(trimPct2, "#.0") + "%", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 5, "Unresolved", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 1, 5, str.tostring(nExpired), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stats, 0, 6, "Net R / avg", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(stats, 1, 6, str.tostring(sumR, "#.1") + "R / " + str.tostring(expectancy, "#.2") + "R", text_color=netCol, bgcolor=color.new(color.black, 70), text_size=size.small)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 alertcondition(isBuyReentry, "BUY failed break", "BUY — failed breakdown, back inside range on {{ticker}} @ {{close}}")
