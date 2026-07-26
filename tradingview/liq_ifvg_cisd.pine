@@ -24,6 +24,8 @@ pivotLen = input.int(8, "Swing lookback for liquidity", minval=2, group="Liquidi
 maxPools = input.int(6, "Liquidity pools tracked per side", minval=1, maxval=20, group="Liquidity")
 requireCloseBack = input.bool(false, "Sweep candle must also close back inside", group="Liquidity", tooltip="Off by default. CISD is already the reversal confirmation, so demanding rejection on the sweep candle too means almost nothing fires in a trend.")
 armBars = input.int(12, "Setup stays armed for (bars)", minval=1, group="Liquidity")
+tradeReversal = input.bool(true, "Trade REVERSALS (sweep high -> short)", group="Liquidity")
+tradeCont = input.bool(true, "Trade CONTINUATIONS (sweep high, hold above -> long)", group="Liquidity")
 
 // ── CISD ──────────────────────────────────────────────────────────────────────
 minRunLen = input.int(2, "Min candles in the opposing run", minval=1, group="CISD")
@@ -88,6 +90,8 @@ sweptHigh = false
 sweptLow = false
 var float sweepHighPx = na
 var float sweepLowPx = na
+var float sweptHiLvl = na
+var float sweptLoLvl = na
 var int armedBearBar = -9999
 var int armedBullBar = -9999
 
@@ -98,6 +102,7 @@ if array.size(poolHi) > 0
             if high > lvl and (not requireCloseBack or close < lvl)
                 sweptHigh := true
                 sweepHighPx := high
+                sweptHiLvl := lvl
                 dl3 = array.get(poolHiLn, i)
                 if not na(dl3)
                     line.delete(dl3)
@@ -113,6 +118,7 @@ if array.size(poolLo) > 0
             if low < lvl2 and (not requireCloseBack or close > lvl2)
                 sweptLow := true
                 sweepLowPx := low
+                sweptLoLvl := lvl2
                 dl4 = array.get(poolLoLn, j)
                 if not na(dl4)
                     line.delete(dl4)
@@ -260,11 +266,23 @@ cooled = bar_index - lastSigBar >= cooldownBars
 ifvgBuyOk = not useIfvg or inBullIfvg
 ifvgSellOk = not useIfvg or inBearIfvg
 
-rawBuy = bullArmed and cisdBull and cooled and ifvgBuyOk and not na(sweepLowPx)
-rawSell = bearArmed and cisdBear and cooled and ifvgSellOk and not na(sweepHighPx)
+// REVERSAL: liquidity taken, then price turns back. Wrong if it runs on.
+revBuy = tradeReversal and bullArmed and cisdBull and not na(sweepLowPx)
+revSell = tradeReversal and bearArmed and cisdBear and not na(sweepHighPx)
 
-buySl = math.max(sweepLowPx - atrV * slBufAtr, close - atrV * maxRiskAtr)
-sellSl = math.min(sweepHighPx + atrV * slBufAtr, close + atrV * maxRiskAtr)
+// CONTINUATION: liquidity taken and price HOLDS beyond it. Wrong if it
+// falls back inside the level it just cleared.
+contBuy = tradeCont and bearArmed and cisdBull and not na(sweptHiLvl) and close > sweptHiLvl
+contSell = tradeCont and bullArmed and cisdBear and not na(sweptLoLvl) and close < sweptLoLvl
+
+rawBuy = (revBuy or contBuy) and cooled and ifvgBuyOk
+rawSell = (revSell or contSell) and cooled and ifvgSellOk
+
+// Stop sits at whatever invalidates that particular premise
+buyAnchor = revBuy ? sweepLowPx : sweptHiLvl
+sellAnchor = revSell ? sweepHighPx : sweptLoLvl
+buySl = math.max(buyAnchor - atrV * slBufAtr, close - atrV * maxRiskAtr)
+sellSl = math.min(sellAnchor + atrV * slBufAtr, close + atrV * maxRiskAtr)
 buyRisk = close - buySl
 sellRisk = sellSl - close
 buyTp = close + buyRisk * rrMult
@@ -279,14 +297,14 @@ buySignal = buyOk and not sellOk
 sellSignal = sellOk and not buyOk
 
 // Entry / TP / SL as three clean lines rather than filled blocks
-f_draw(isBuy, entry, tp, sl, cisdLvl) =>
+f_draw(isBuy, entry, tp, sl, cisdLvl, kind) =>
     col = isBuy ? color.teal : color.red
     x1 = bar_index
     x2 = bar_index + tradeBars
     line.new(x1, entry, x2, entry, color=color.new(col, 0), width=2)
     line.new(x1, tp, x2, tp, color=color.new(color.teal, 20), style=line.style_dashed, width=1)
     line.new(x1, sl, x2, sl, color=color.new(color.red, 20), style=line.style_dashed, width=1)
-    label.new(x2, entry, (isBuy ? "▲ BUY " : "▼ SELL ") + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(col, 15), textcolor=color.white, size=size.small)
+    label.new(x2, entry, (isBuy ? "▲ BUY " : "▼ SELL ") + kind + " " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(col, 15), textcolor=color.white, size=size.small)
     label.new(x2, tp, "TP " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.teal, 40), textcolor=color.white, size=size.tiny)
     label.new(x2, sl, "SL " + str.tostring(sl, format.mintick), style=label.style_label_left, color=color.new(color.red, 40), textcolor=color.white, size=size.tiny)
     if showPosBox
@@ -297,10 +315,10 @@ f_draw(isBuy, entry, tp, sl, cisdLvl) =>
         label.new(x1 - 10, cisdLvl, "CISD ✓ " + str.tostring(cisdLvl, format.mintick), style=label.style_label_right, color=color.new(col, 25), textcolor=color.white, size=size.tiny)
 
 if buySignal
-    f_draw(true, close, buyTp, buySl, cisdBullLevel)
+    f_draw(true, close, buyTp, buySl, cisdBullLevel, revBuy ? "rev" : "cont")
     lastSigBar := bar_index
 if sellSignal
-    f_draw(false, close, sellTp, sellSl, cisdBearLevel)
+    f_draw(false, close, sellTp, sellSl, cisdBearLevel, revSell ? "rev" : "cont")
     lastSigBar := bar_index
 
 // ── Outcome tracking ──────────────────────────────────────────────────────────
