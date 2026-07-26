@@ -20,7 +20,7 @@
 //
 // Signals are evaluated on CLOSED bars. Set alerts to "Once Per Bar Close".
 
-indicator("Opening Range 8am — Bounce & Break", overlay=true, max_lines_count=200, max_labels_count=300, max_boxes_count=100)
+indicator("Opening Range 8am — Bounce & Break", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ── Session ───────────────────────────────────────────────────────────────────
 tzIn = input.string("UTC", "Timezone", options=["UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Tokyo", "Australia/Sydney", "Europe/Berlin"], group="Range")
@@ -40,7 +40,9 @@ maxSignals = input.int(4, "Max signals per day (0 = unlimited)", minval=0, group
 // ── Targets and stops ─────────────────────────────────────────────────────────
 breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
 slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step=0.1, group="Targets")
-showLevels = input.bool(true, "Shade the range", group="Display")
+showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
+showPosition = input.bool(true, "Draw position box on each signal", group="Display")
+posBars = input.int(60, "Position box length (bars)", minval=5, group="Display")
 
 atrV = ta.atr(14)
 volMA = ta.sma(volume, volLen)
@@ -62,6 +64,7 @@ var bool rSet = false
 var bool brokeUp = false
 var bool brokeDn = false
 var int sigCount = 0
+var int rStartBar = na
 var line lnHi = na
 var line lnLo = na
 var box bxRange = na
@@ -74,6 +77,9 @@ if newDay
     brokeDn := false
     sigCount := 0
 
+if inRange and not inRange[1]
+    rStartBar := bar_index
+
 if inRange
     rHigh := na(rHigh) ? high : math.max(rHigh, high)
     rLow := na(rLow) ? low : math.min(rLow, low)
@@ -82,17 +88,16 @@ rangeJustClosed = not inRange and inRange[1] and not na(rHigh) and not na(rLow)
 
 if rangeJustClosed
     rSet := true
-    lnHi := line.new(bar_index, rHigh, bar_index + 1, rHigh, color=color.new(color.red, 0), width=2)
-    lnLo := line.new(bar_index, rLow, bar_index + 1, rLow, color=color.new(color.teal, 0), width=2)
+    lnHi := line.new(rStartBar, rHigh, bar_index, rHigh, color=color.new(color.red, 0), width=2)
+    lnLo := line.new(rStartBar, rLow, bar_index, rLow, color=color.new(color.teal, 0), width=2)
+    // Shade ONLY the opening-range hour itself, not the rest of the day
     if showLevels
-        bxRange := box.new(bar_index, rHigh, bar_index + 1, rLow, border_color=color.new(color.gray, 70), bgcolor=color.new(color.blue, 92))
+        bxRange := box.new(rStartBar, rHigh, bar_index, rLow, border_color=color.new(color.gray, 60), bgcolor=color.new(color.blue, 88))
 
-// Keep today's levels stretching to the current bar
+// The two levels keep extending; the shaded box stays on the range hour
 if rSet and not na(lnHi)
     line.set_x2(lnHi, bar_index)
     line.set_x2(lnLo, bar_index)
-    if showLevels and not na(bxRange)
-        box.set_right(bxRange, bar_index)
 
 // ── Interaction with the levels ───────────────────────────────────────────────
 canSignal = rSet and not inRange and afterRange and (maxSignals == 0 or sigCount < maxSignals)
@@ -134,10 +139,20 @@ rangeHeight = rHigh - rLow
 
 // Pine forbids assigning to a global from inside a function, so f_mark only
 // draws; the signal counter is incremented at global scope by each caller.
+// Draws the arrow label plus a long/short position: profit zone in teal from
+// entry to TP, risk zone in red from entry to SL, like the position tool.
 f_mark(isBuy, txt, tp, sl) =>
     col = isBuy ? color.teal : color.red
+    entry = close
     yPos = isBuy ? low - atrV : high + atrV
     label.new(bar_index, yPos, txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick), style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 15), textcolor=color.white, size=size.small)
+    if showPosition
+        l = bar_index
+        r = bar_index + posBars
+        box.new(l, math.max(tp, entry), r, math.min(tp, entry), border_color=color.new(color.teal, 60), bgcolor=color.new(color.teal, 85))
+        box.new(l, math.max(entry, sl), r, math.min(entry, sl), border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
+        line.new(l, entry, r, entry, color=color.new(color.gray, 0), width=1)
+        label.new(r, entry, isBuy ? "LONG" : "SHORT", style=label.style_label_left, color=color.new(col, 20), textcolor=color.white, size=size.tiny)
 
 if isBuyBounce
     f_mark(true, "BUY bounce", rHigh, rLow - atrV * slAtrBuf)
