@@ -4,17 +4,16 @@
 // 1. Locks the HIGH and LOW of the 08:00 hourly candle and shades that hour.
 // 2. Extends both levels across the session.
 // 3. Reads how price interacts with them:
-//      BOUNCE   — wicks through a level, closes back INSIDE  -> trade the opposite level
-//      BREAK    — closes DECISIVELY outside                  -> trade the breakout
-//      RE-ENTRY — broke out, failed, closed back INSIDE      -> trade the opposite level
-//    The re-entry is the failed-breakout reversal: a break that cannot hold
-//    usually runs to the far side of the range.
-// 4. Draws the trade with a long/short position box.
+//      BOUNCE   — wicks through a level, closes back INSIDE  -> target opposite level
+//      BREAK    — closes DECISIVELY outside                  -> target measured move
+//      RE-ENTRY — broke out, failed, closed back INSIDE      -> target opposite level
+// 4. Draws ONE marker per signal, arrow included, so the direction shown can
+//    never disagree with the trade described. Optional position box.
 //
-// Works on 1/5/15/30m: the range window is wall-clock based, and the position
-// box length is specified in minutes, so it adapts to the chart timeframe.
+// "Blocked setups" (grey dots) show where a pattern was detected but a filter
+// rejected it, and name the filter. Use it to tune rather than guess.
 //
-// Signals evaluate on CLOSED bars. Set alerts to "Once Per Bar Close".
+// Works on 1/5/15/30m. Signals evaluate on CLOSED bars — alerts "Once Per Bar Close".
 
 indicator("Opening Range 8am — Bounce, Break & Failed Break", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
@@ -22,25 +21,25 @@ indicator("Opening Range 8am — Bounce, Break & Failed Break", overlay=true, ma
 tzIn = input.string("UTC", "Timezone", options=["UTC", "America/New_York", "Europe/London", "Asia/Dubai", "Asia/Tokyo", "Australia/Sydney", "Europe/Berlin"], group="Range")
 rangeHour = input.int(8, "Range start hour", minval=0, maxval=23, group="Range")
 rangeMinutes = input.int(60, "Range length (minutes)", minval=5, group="Range")
-activeHours = input.int(8, "Stop signalling after (hours)", minval=1, maxval=24, group="Range")
+activeHours = input.int(12, "Stop signalling after (hours)", minval=1, maxval=24, group="Range")
 
 // ── Which signals to take ─────────────────────────────────────────────────────
 useBounce = input.bool(true, "Bounce signals", group="Signals")
 useBreak = input.bool(true, "Breakout signals", group="Signals")
-useReentry = input.bool(true, "Failed-break re-entry signals", group="Signals")
+useReentry = input.bool(true, "Failed-break re-entry signals (highest quality)", group="Signals")
 
-// ── Accuracy filters ──────────────────────────────────────────────────────────
-useVol = input.bool(true, "Require above-average volume", group="Accuracy")
-volLen = input.int(20, "Volume average length", minval=2, group="Accuracy")
-volMult = input.float(1.2, "Volume must exceed average x", minval=0.5, step=0.1, group="Accuracy")
-reqDirCandle = input.bool(true, "Signal candle must close in trade direction", group="Accuracy")
-minBodyPct = input.float(40.0, "Min candle body (% of its range)", minval=0.0, maxval=100.0, step=5.0, group="Accuracy")
-minWickAtr = input.float(0.05, "Bounce: min wick beyond level (x ATR)", minval=0.0, step=0.05, group="Accuracy")
-minBreakAtr = input.float(0.10, "Break: min close beyond level (x ATR)", minval=0.0, step=0.05, group="Accuracy")
-minRangeAtr = input.float(1.0, "Skip day if range smaller than (x ATR)", minval=0.0, step=0.5, group="Accuracy")
-cooldownBars = input.int(5, "Min bars between signals", minval=0, group="Accuracy")
-noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", group="Accuracy")
-maxSignals = input.int(4, "Max signals per day (0 = unlimited)", minval=0, group="Accuracy")
+// ── Filters (loosen to get more signals, tighten to get fewer) ────────────────
+useVol = input.bool(true, "Require above-average volume", group="Filters")
+volLen = input.int(20, "Volume average length", minval=2, group="Filters")
+volMult = input.float(1.0, "Volume must exceed average x", minval=0.5, step=0.1, group="Filters")
+reqDirCandle = input.bool(true, "Signal candle must close in trade direction", group="Filters")
+minBodyPct = input.float(25.0, "Min candle body (% of its range)", minval=0.0, maxval=100.0, step=5.0, group="Filters")
+minWickAtr = input.float(0.05, "Bounce: min wick beyond level (x ATR)", minval=0.0, step=0.05, group="Filters")
+minBreakAtr = input.float(0.10, "Break: min close beyond level (x ATR)", minval=0.0, step=0.05, group="Filters")
+minRangeAtr = input.float(0.5, "Skip day if range smaller than (x ATR)", minval=0.0, step=0.25, group="Filters")
+cooldownBars = input.int(3, "Min bars between signals", minval=0, group="Filters")
+noBounceAfterBreak = input.bool(true, "No plain bounces off a broken level", group="Filters")
+maxSignals = input.int(6, "Max signals per day (0 = unlimited)", minval=0, group="Filters")
 
 // ── Targets and stops ─────────────────────────────────────────────────────────
 breakTpMult = input.float(1.0, "Break TP = range height x", minval=0.1, step=0.1, group="Targets")
@@ -50,12 +49,14 @@ slAtrBuf = input.float(0.5, "Stop buffer beyond level (x ATR)", minval=0.0, step
 showLevels = input.bool(true, "Shade the opening-range hour", group="Display")
 showPosition = input.bool(true, "Draw position box on each signal", group="Display")
 posMinutes = input.int(60, "Position box length (minutes)", minval=5, group="Display")
+compactLabels = input.bool(false, "Compact labels (arrow only)", group="Display")
+showBlocked = input.bool(false, "Show blocked setups and why", group="Display")
 
 atrV = ta.atr(14)
 volMA = ta.sma(volume, volLen)
-posBars = math.max(5, int(posMinutes / math.max(timeframe.multiplier, 1)))
+posBars = math.max(3, int(posMinutes / math.max(timeframe.multiplier, 1)))
 
-// ── Track the range window ────────────────────────────────────────────────────
+// ── Range window ──────────────────────────────────────────────────────────────
 h = hour(time, tzIn)
 m = minute(time, tzIn)
 minsOfDay = h * 60 + m
@@ -108,15 +109,15 @@ if rSet and not na(lnHi)
 
 // ── Filters ───────────────────────────────────────────────────────────────────
 rangeHeight = rHigh - rLow
-// A very narrow opening range produces constant false breaks — skip those days
 rangeWideEnough = not na(rangeHeight) and rangeHeight >= atrV * minRangeAtr
 
 barRng = high - low
 bodyOk = barRng > 0 and math.abs(close - open) / barRng >= minBodyPct / 100
 volOk = not useVol or volume > volMA * volMult
 cooled = bar_index - lastSigBar >= cooldownBars
+underCap = maxSignals == 0 or sigCount < maxSignals
 
-baseOk = rSet and not inRange and afterRange and rangeWideEnough and volOk and bodyOk and cooled and (maxSignals == 0 or sigCount < maxSignals)
+baseOk = rSet and not inRange and afterRange and rangeWideEnough and volOk and bodyOk and cooled and underCap
 
 bullCandle = close > open
 bearCandle = close < open
@@ -125,27 +126,29 @@ bearCandle = close < open
 penOkLow = (rLow - low) >= atrV * minWickAtr
 penOkHigh = (high - rHigh) >= atrV * minWickAtr
 
-// BOUNCE — wicked through a level, closed back inside
 bounceLowRaw = low < rLow and close > rLow and penOkLow and (not reqDirCandle or bullCandle)
 bounceHighRaw = high > rHigh and close < rHigh and penOkHigh and (not reqDirCandle or bearCandle)
 bounceLowOk = bounceLowRaw and (not noBounceAfterBreak or not brokeDn)
 bounceHighOk = bounceHighRaw and (not noBounceAfterBreak or not brokeUp)
 
-// BREAK — closed decisively beyond a level, having been inside the bar before
 breakDownRaw = close < rLow - atrV * minBreakAtr and close[1] >= rLow and (not reqDirCandle or bearCandle)
 breakUpRaw = close > rHigh + atrV * minBreakAtr and close[1] <= rHigh and (not reqDirCandle or bullCandle)
 
-// RE-ENTRY — broke out, failed, closed back inside the range.
-// This is the failed-breakout reversal and it targets the opposite level.
 reentryShortRaw = brokeUp and close[1] > rHigh and close < rHigh and close > rLow and (not reqDirCandle or bearCandle)
 reentryLongRaw = brokeDn and close[1] < rLow and close > rLow and close < rHigh and (not reqDirCandle or bullCandle)
 
-isBuyBounce = baseOk and useBounce and bounceLowOk
-isSellBounce = baseOk and useBounce and bounceHighOk
-isBuyBreak = baseOk and useBreak and breakUpRaw
-isSellBreak = baseOk and useBreak and breakDownRaw
+// Raw patterns before the shared filters, used for the blocked-setup diagnostic
+rawBuy = (useBounce and bounceLowOk) or (useBreak and breakUpRaw) or (useReentry and reentryLongRaw)
+rawSell = (useBounce and bounceHighOk) or (useBreak and breakDownRaw) or (useReentry and reentryShortRaw)
+
+// A single bar must not produce opposing signals: re-entry wins, then break,
+// then bounce. Direction is resolved ONCE and everything downstream uses it.
 isBuyReentry = baseOk and useReentry and reentryLongRaw
 isSellReentry = baseOk and useReentry and reentryShortRaw
+isBuyBreak = baseOk and useBreak and breakUpRaw and not isBuyReentry and not isSellReentry
+isSellBreak = baseOk and useBreak and breakDownRaw and not isBuyReentry and not isSellReentry
+isBuyBounce = baseOk and useBounce and bounceLowOk and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
+isSellBounce = baseOk and useBounce and bounceHighOk and not isBuyReentry and not isSellReentry and not isBuyBreak and not isSellBreak
 
 buySignal = isBuyBounce or isBuyBreak or isBuyReentry
 sellSignal = isSellBounce or isSellBreak or isSellReentry
@@ -155,28 +158,28 @@ if rSet and close < rLow
 if rSet and close > rHigh
     brokeUp := true
 
-// ── Drawing ───────────────────────────────────────────────────────────────────
-// Pine forbids assigning to a global inside a function, so this only draws;
-// the counter and cooldown are updated at global scope by each caller.
+// ── Drawing — ONE marker per signal, arrow inside it ──────────────────────────
+// Pine forbids assigning to a global inside a function, so this only draws.
 f_mark(isBuy, txt, tp, sl) =>
     col = isBuy ? color.teal : color.red
     entry = close
-    yPos = isBuy ? low - atrV : high + atrV
-    label.new(bar_index, yPos, txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick), style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 15), textcolor=color.white, size=size.small)
+    arrow = isBuy ? "▲ " : "▼ "
+    body = compactLabels ? arrow + (isBuy ? "BUY" : "SELL") : arrow + txt + "\nTP " + str.tostring(tp, format.mintick) + "\nSL " + str.tostring(sl, format.mintick)
+    yPos = isBuy ? low - atrV * 0.6 : high + atrV * 0.6
+    label.new(bar_index, yPos, body, style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(col, 10), textcolor=color.white, size=size.small)
     if showPosition
         l = bar_index
         r = bar_index + posBars
-        box.new(l, math.max(tp, entry), r, math.min(tp, entry), border_color=color.new(color.teal, 60), bgcolor=color.new(color.teal, 85))
-        box.new(l, math.max(entry, sl), r, math.min(entry, sl), border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
-        line.new(l, entry, r, entry, color=color.new(color.gray, 0), width=1)
-        label.new(r, entry, isBuy ? "LONG" : "SHORT", style=label.style_label_left, color=color.new(col, 20), textcolor=color.white, size=size.tiny)
+        box.new(l, math.max(tp, entry), r, math.min(tp, entry), border_color=color.new(color.teal, 70), bgcolor=color.new(color.teal, 88))
+        box.new(l, math.max(entry, sl), r, math.min(entry, sl), border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 88))
+        line.new(l, entry, r, entry, color=color.new(col, 0), width=1)
 
-if isBuyBounce
-    f_mark(true, "BUY bounce", rHigh, rLow - atrV * slAtrBuf)
+if isBuyReentry
+    f_mark(true, "BUY failed break", rHigh, rLow - atrV * slAtrBuf)
     sigCount := sigCount + 1
     lastSigBar := bar_index
-if isSellBounce
-    f_mark(false, "SELL bounce", rLow, rHigh + atrV * slAtrBuf)
+if isSellReentry
+    f_mark(false, "SELL failed break", rLow, rHigh + atrV * slAtrBuf)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 if isBuyBreak
@@ -187,23 +190,27 @@ if isSellBreak
     f_mark(false, "SELL break", rLow - rangeHeight * breakTpMult, rLow + atrV * slAtrBuf)
     sigCount := sigCount + 1
     lastSigBar := bar_index
-if isBuyReentry
-    f_mark(true, "BUY failed break", rHigh, rLow - atrV * slAtrBuf)
+if isBuyBounce
+    f_mark(true, "BUY bounce", rHigh, rLow - atrV * slAtrBuf)
     sigCount := sigCount + 1
     lastSigBar := bar_index
-if isSellReentry
-    f_mark(false, "SELL failed break", rLow, rHigh + atrV * slAtrBuf)
+if isSellBounce
+    f_mark(false, "SELL bounce", rLow, rHigh + atrV * slAtrBuf)
     sigCount := sigCount + 1
     lastSigBar := bar_index
 
-plotshape(buySignal, "Buy", style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 0), size=size.tiny)
-plotshape(sellSignal, "Sell", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
+// ── Blocked setups: pattern found, filter said no ─────────────────────────────
+blocked = (rawBuy or rawSell) and not buySignal and not sellSignal and rSet and afterRange
+why = not rangeWideEnough ? "range too narrow" : not volOk ? "low volume" : not bodyOk ? "weak body" : not cooled ? "cooldown" : not underCap ? "daily cap" : "filtered"
+if showBlocked and blocked
+    label.new(bar_index, rawBuy ? low : high, why, style=rawBuy ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
-alertcondition(isBuyBounce, "BUY bounce off range low", "BUY — bounced off range LOW on {{ticker}} @ {{close}}")
-alertcondition(isSellBounce, "SELL bounce off range high", "SELL — bounced off range HIGH on {{ticker}} @ {{close}}")
-alertcondition(isBuyBreak, "BUY break above range high", "BUY — broke ABOVE range HIGH on {{ticker}} @ {{close}}")
-alertcondition(isSellBreak, "SELL break below range low", "SELL — broke BELOW range LOW on {{ticker}} @ {{close}}")
-alertcondition(isBuyReentry, "BUY failed break (re-entry)", "BUY — failed breakdown, back inside range on {{ticker}} @ {{close}}")
-alertcondition(isSellReentry, "SELL failed break (re-entry)", "SELL — failed breakout, back inside range on {{ticker}} @ {{close}}")
-alertcondition(buySignal or sellSignal, "Any range signal", "Opening-range signal on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(isBuyReentry, "BUY failed break", "BUY — failed breakdown, back inside range on {{ticker}} @ {{close}}")
+alertcondition(isSellReentry, "SELL failed break", "SELL — failed breakout, back inside range on {{ticker}} @ {{close}}")
+alertcondition(isBuyBreak, "BUY break", "BUY — broke ABOVE range HIGH on {{ticker}} @ {{close}}")
+alertcondition(isSellBreak, "SELL break", "SELL — broke BELOW range LOW on {{ticker}} @ {{close}}")
+alertcondition(isBuyBounce, "BUY bounce", "BUY — bounced off range LOW on {{ticker}} @ {{close}}")
+alertcondition(isSellBounce, "SELL bounce", "SELL — bounced off range HIGH on {{ticker}} @ {{close}}")
+alertcondition(buySignal, "Any BUY", "BUY signal on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(sellSignal, "Any SELL", "SELL signal on {{ticker}} ({{interval}}) @ {{close}}")
