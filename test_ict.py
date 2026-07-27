@@ -65,13 +65,13 @@ def driftless(n=6000, seed=0):
 def main() -> int:
     m, p = trending(), IctParams()
     fails: list[str] = []
-    side, sl_a, kind_a = compute_signals(m, p)
+    side, sl_a, kind_a, pool_a, rng_a = compute_signals(m, p)
     print(f"signals on full series : {int((side != 0).sum())}")
 
     # 1. No lookahead. A prefix must decide exactly what the full series decided.
     for cut in (1500, 2500, 3300):
         pre = _mk(m.o[:cut], m.h[:cut], m.l[:cut], m.c[:cut])
-        s2, sl2, _ = compute_signals(pre, p)
+        s2, sl2, _, _, _ = compute_signals(pre, p)
         if not np.array_equal(side[:cut], s2):
             bad = np.where(side[:cut] != s2)[0][:10]
             fails.append(f"LOOKAHEAD: prefix {cut} differs at bars {bad}")
@@ -112,29 +112,57 @@ def main() -> int:
 
     # 5. The sweep's cache must not change any result.
     if stats(simulate(m, p, None, 0, 2400)) != stats(
-            simulate(m, p, (side, sl_a, kind_a), 0, 2400)):
+            simulate(m, p, (side, sl_a, kind_a, pool_a, rng_a), 0, 2400)):
         fails.append("CACHE: precomputed signals gave a different result")
 
     # 6. ...and its key is only valid if rr_mult cannot move a signal.
-    a, _, _ = compute_signals(m, replace(p, rr_mult=1.5))
-    b, _, _ = compute_signals(m, replace(p, rr_mult=3.0))
+    a = compute_signals(m, replace(p, rr_mult=1.5))[0]
+    b = compute_signals(m, replace(p, tp_mode="pool", rr_mult=3.0))[0]
     if not np.array_equal(a, b):
-        fails.append("CACHE KEY: rr_mult changed which bars signal")
+        fails.append("CACHE KEY: rr_mult/tp_mode changed which bars signal")
+
+    # 7. Structural targets must sit at the level they claim, and never be
+    #    taken when the chart offers less room than min_rr.
+    for tpm, level in (("pool", pool_a), ("range", rng_a)):
+        q = replace(p, tp_mode=tpm, min_rr=1.0)
+        for t in simulate(m, q)[:50]:
+            if not np.isclose(t.tp, level[t.bar]):
+                fails.append(f"{tpm.upper()} TP: {t.tp} != level {level[t.bar]}")
+                break
+            if not np.isclose(t.entry, m.o[t.bar + 1]):
+                fails.append(f"{tpm.upper()} FILL: entry != next open")
+                break
+            if abs(t.tp - t.entry) / abs(t.entry - t.sl) < q.min_rr - 1e-9:
+                fails.append(f"{tpm.upper()} MIN_RR: took a trade below min_rr")
+                break
+
+    # 8. A higher min_rr can only ever remove trades, never add them.
+    counts = [len(simulate(m, replace(p, tp_mode="pool", min_rr=r)))
+              for r in (0.5, 1.0, 2.0, 3.0)]
+    if counts != sorted(counts, reverse=True):
+        fails.append(f"MIN_RR MONOTONICITY: trade counts {counts} not decreasing")
 
     s = stats(trades)
     print(f"trending sample        : {s['n']} trades, win {s['wr']:.1f}%, "
           f"avg {s['avg_r']:+.3f}R, pf {s['pf']:.2f}")
+    for tpm in ("pool", "range"):
+        k = stats(simulate(m, replace(p, tp_mode=tpm)))
+        print(f"  tp={tpm:<18}: {k['n']} trades, win {k['wr']:.1f}%, "
+              f"avg {k['avg_r']:+.3f}R, pf {k['pf']:.2f}")
 
-    # 7. Null hypothesis. No drift means no edge; anything positive is a leak.
-    pool: list = []
-    for seed in range(12):
-        pool += simulate(driftless(seed=seed), p)
-    ns = stats(pool)
-    print(f"driftless random walk  : {ns['n']} trades, win {ns['wr']:.1f}%, "
-          f"avg {ns['avg_r']:+.3f}R, pf {ns['pf']:.2f}")
-    if ns["avg_r"] > 0:
-        fails.append(f"NULL HYPOTHESIS: {ns['avg_r']:+.3f}R on pure noise — "
-                     "the backtester is inventing profit")
+    # 9. Null hypothesis, every target mode. No drift means no edge, so a
+    #    positive expectancy on noise is a leak no matter how the TP is chosen.
+    for tpm in ("atr", "pool", "range"):
+        q = replace(p, tp_mode=tpm)
+        acc: list = []
+        for seed in range(12):
+            acc += simulate(driftless(seed=seed), q)
+        ns = stats(acc)
+        print(f"noise tp={tpm:<14}: {ns['n']} trades, win {ns['wr']:.1f}%, "
+              f"avg {ns['avg_r']:+.3f}R, pf {ns['pf']:.2f}")
+        if ns["avg_r"] > 0:
+            fails.append(f"NULL HYPOTHESIS ({tpm}): {ns['avg_r']:+.3f}R on pure "
+                         "noise — the backtester is inventing profit")
 
     print()
     if fails:

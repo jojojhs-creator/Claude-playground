@@ -18,7 +18,7 @@ Branch: `claude/mt5-telegram-trading-bot-rxcae1`
 | `bot.py` | Orchestrator: APScheduler scan cycle + position monitor. |
 | `backtest.py` | Replays current `.env` settings over history. **Use before any live change.** Also the engine (`load_market`/`simulate`) used by the sweep. |
 | `sweep.py` | Grid search with a 60/40 train/test split. Judge settings by the test column. |
-| `ict.py` | Backtest for the liquidity-sweep/CISD/IFVG model (the Pine indicator), with its own `--sweep`. Not wired into the live bot. |
+| `ict.py` | Backtest for the liquidity-sweep/CISD/IFVG model (the Pine indicator), with its own `--sweep`. Selectable targets (`atr`/`pool`/`range`) and an ADR impact filter. Not wired into the live bot. |
 | `test_ict.py` | Regression guard for `ict.py`. numpy only, runs anywhere. |
 | `tradingview/*.pine` | Companion TradingView indicator (separate from the bot). |
 
@@ -97,6 +97,16 @@ A 200-period SMA needs 201 bars to be defined there, so `sma200` was NaN,
 nor SELL — the live bot silently scored 5-of-**6** while the backtest scored
 5-of-7. Bar counts are now derived from `sma_200 + 150` (min 400), and
 `analyze()` logs a warning if `sma200` is ever NaN on the signal bar.
+
+### R is the wrong yardstick when lots are fixed
+
+Every mode here trades a **fixed** lot, so a trade with a wide stop risks more
+dollars than one with a tight stop. Average R weights those equally; the account
+does not. A structural target can therefore show avg **−0.11R** and profit factor
+**1.30** at the same time — both true, measuring different things. `stats()`
+reports `per` (dollars per trade) alongside `avg_r`, and `ict.py --sweep`
+requires a setting to be positive in **both** before calling it robust. Only
+switch to R as the primary measure if lot size ever becomes risk-scaled.
 
 Dollar-based `TRAIL_ACTIVATE_USD` does not transfer across symbols: at $12 it
 arms after a $0.60 move on XAUUSD 0.2 lot (inside bar noise) but needs a $120
