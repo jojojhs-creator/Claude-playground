@@ -75,6 +75,11 @@ class IctParams:
     tp_mode: str = "atr"
     tp_buf_atr: float = 0.10      # take profit just BEFORE the level, not at it
     min_rr: float = 1.0           # structural target closer than this -> no trade
+    # ...and a ceiling. Risk is capped at max_risk_atr, so leaving reward
+    # unbounded lets the nearest unswept pool sit a whole day's range away while
+    # the stop sits inside one bar of noise. Those resolve on different clocks
+    # and the stop always wins. Clamp the target to something reachable.
+    max_struct_rr: float = 5.0
 
     # "How big is the impact": how stretched the last 24h already is against a
     # normal day. 0 disables. 1.3 means skip when the day has already run 30%
@@ -385,6 +390,9 @@ def simulate(m: Market, p: IctParams, sig=None,
             tp = entry + risk * p.rr_mult if is_buy else entry - risk * p.rr_mult
         else:
             tp = pool_a[i] if p.tp_mode == "pool" else rng_a[i]
+            if not np.isnan(tp) and p.max_struct_rr > 0:
+                cap = p.max_struct_rr * risk
+                tp = (min(tp, entry + cap) if is_buy else max(tp, entry - cap))
             # No level to aim at, or the chart is not offering enough room to
             # justify the risk. Refusing the trade IS the decision.
             reward = (tp - entry) if is_buy else (entry - tp)
@@ -568,6 +576,8 @@ def main() -> int:
             base = replace(base, max_adr_used=float(a.split("=", 1)[1]))
         elif a.startswith("--minrr="):
             base = replace(base, min_rr=float(a.split("=", 1)[1]))
+        elif a.startswith("--maxrr="):
+            base = replace(base, max_struct_rr=float(a.split("=", 1)[1]))
     if base.tp_mode not in ("atr", "pool", "range"):
         print("--tp must be atr, pool or range")
         return 1

@@ -108,6 +108,16 @@ reports `per` (dollars per trade) alongside `avg_r`, and `ict.py --sweep`
 requires a setting to be positive in **both** before calling it robust. Only
 switch to R as the primary measure if lot size ever becomes risk-scaled.
 
+### A structural target needs a ceiling, not just a floor
+
+Pools are consumed once swept, so the nearest *unswept* pool can be a whole
+day's range away. On M1 gold that produced a **SELL with a $1.65 stop and a $31
+target — 18.8R**. Risk was capped at `max_risk_atr` while reward was left
+unbounded, so the stop sat inside one bar of noise and the target needed hours
+to days. They resolve on different clocks and the stop always wins first.
+`max_struct_rr` (default 5) clamps it. `min_rr` alone is not enough — it only
+guards the near side.
+
 Dollar-based `TRAIL_ACTIVATE_USD` does not transfer across symbols: at $12 it
 arms after a $0.60 move on XAUUSD 0.2 lot (inside bar noise) but needs a $120
 move on BTCUSD 0.1 lot. Make it ATR-relative if it is revived.

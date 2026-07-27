@@ -126,14 +126,30 @@ def main() -> int:
     for tpm, level in (("pool", pool_a), ("range", rng_a)):
         q = replace(p, tp_mode=tpm, min_rr=1.0)
         for t in simulate(m, q)[:50]:
-            if not np.isclose(t.tp, level[t.bar]):
-                fails.append(f"{tpm.upper()} TP: {t.tp} != level {level[t.bar]}")
+            risk = abs(t.entry - t.sl)
+            cap = t.entry + (risk if t.is_buy else -risk) * q.max_struct_rr
+            want = min(level[t.bar], cap) if t.is_buy else max(level[t.bar], cap)
+            if not np.isclose(t.tp, want):
+                fails.append(f"{tpm.upper()} TP: {t.tp} != {want} "
+                             f"(level {level[t.bar]}, cap {cap})")
+                break
+            if abs(t.tp - t.entry) / risk > q.max_struct_rr + 1e-9:
+                fails.append(f"{tpm.upper()} MAX_RR: target beyond the cap")
                 break
             if not np.isclose(t.entry, m.o[t.bar + 1]):
                 fails.append(f"{tpm.upper()} FILL: entry != next open")
                 break
             if abs(t.tp - t.entry) / abs(t.entry - t.sl) < q.min_rr - 1e-9:
                 fails.append(f"{tpm.upper()} MIN_RR: took a trade below min_rr")
+                break
+
+    # 8b. A tighter R cap can only shrink targets, never grow them.
+    wide = {t.bar: t.tp for t in simulate(m, replace(p, tp_mode="pool", max_struct_rr=20))}
+    for t in simulate(m, replace(p, tp_mode="pool", max_struct_rr=3)):
+        if t.bar in wide:
+            far = wide[t.bar]
+            if (t.tp > far + 1e-9) if t.is_buy else (t.tp < far - 1e-9):
+                fails.append("MAX_RR MONOTONICITY: tighter cap gave a further target")
                 break
 
     # 8. A higher min_rr can only ever remove trades, never add them.
