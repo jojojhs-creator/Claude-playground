@@ -100,7 +100,7 @@ minRRX           = autoTf ? (tfMin <= 1 ? 1.80 : tfMin <= 5 ? 1.50 : tfMin <= 15
 maxAdrUsedX      = autoTf ? (tfMin <= 1 ? 1.15 : tfMin <= 5 ? 1.25 : tfMin <= 15 ? 1.40 : 0.00) : maxAdrUsed
 // A sweep that closes back inside is a stricter, cleaner definition of a trap.
 // Worth demanding where noise dominates; too restrictive once bars are big.
-requireCloseBackX = autoTf ? tfMin <= 15 : requireCloseBack
+requireCloseBackX = autoTf ? tfMin <= 5 : requireCloseBack
 tfName = tfMin <= 1 ? "M1" : tfMin <= 5 ? "M5" : tfMin <= 15 ? "M15" : "M30+"
 
 atrV = ta.atr(14)
@@ -403,6 +403,31 @@ if setupReady and not adrOk
 if setupReady and adrOk and ((rawBuy and not buyRoomOk) or (rawSell and not sellRoomOk))
     nNoRoom := nNoRoom + 1
 
+// ── Trade state ───────────────────────────────────────────────────────────────
+// The signal is decided on a bar's CLOSE, which is not a price anyone can
+// transact at. The earliest realistic fill is the NEXT bar's open, so a signal
+// is parked for one bar and filled there. Scoring at the signal close flatters
+// every number on the results table.
+var bool pending = false
+var bool pIsBuy = false
+var float pSl = na
+var float pTp = na
+var bool inTrade = false
+var bool tIsBuy = false
+var float tEntry = na
+var float tSl = na
+var float tTp = na
+var float tR = na
+var int nTrades = 0
+var int nWins = 0
+var int nLosses = 0
+var int nGapped = 0
+var float sumR = 0.0
+
+// Only one position at a time, so a signal arriving mid-trade is not taken —
+// and must not be drawn either, or the chart shows a trade the table ignores.
+canTake = not inTrade and not pending
+
 // ── Drawing, with every object tracked so it can be erased ───────────────────
 var array<line> tLines = array.new_line()
 var array<label> tLabels = array.new_label()
@@ -433,41 +458,36 @@ f_draw(isBuy, entry, tp, sl, cisdLvl, kind, room) =>
         array.push(tLines, line.new(x1 - 8, cisdLvl, x1 + 2, cisdLvl, color=color.new(col, 20), style=line.style_dotted, width=2))
         array.push(tLabels, label.new(x1 - 8, cisdLvl, "CISD ✓", style=label.style_label_right, color=color.new(col, 40), textcolor=color.white, size=size.tiny))
 
-if buySignal
+if buySignal and canTake
     if hidePast
         f_clear()
     f_draw(true, close, buyTp, buySl, cisdBullLevel, revBuy ? "rev" : "cont", buyRoom)
     lastSigBar := bar_index
-if sellSignal
+if sellSignal and canTake
     if hidePast
         f_clear()
     f_draw(false, close, sellTp, sellSl, cisdBearLevel, revSell ? "rev" : "cont", sellRoom)
     lastSigBar := bar_index
 
 // ── Outcome tracking ──────────────────────────────────────────────────────────
-var bool inTrade = false
-var bool tIsBuy = false
-var float tSl = na
-var float tTp = na
-var int tBar = na
-var float tR = na
-var int nTrades = 0
-var int nWins = 0
-var int nLosses = 0
-var float sumR = 0.0
+// Fill first, against THIS bar's open, then test the same bar for an exit —
+// a trade can be opened and stopped inside one candle, and pretending
+// otherwise hides the losses that hurt most.
+if pending and not inTrade
+    fillRisk = pIsBuy ? open - pSl : pSl - open
+    if fillRisk > 0
+        inTrade := true
+        tIsBuy := pIsBuy
+        tEntry := open
+        tSl := pSl
+        tTp := pTp
+        tR := (pIsBuy ? pTp - open : open - pTp) / fillRisk
+        nTrades := nTrades + 1
+    else
+        nGapped := nGapped + 1      // opened beyond its own stop
+    pending := false
 
-if (buySignal or sellSignal) and not inTrade
-    inTrade := true
-    tIsBuy := buySignal
-    tSl := buySignal ? buySl : sellSl
-    tTp := buySignal ? buyTp : sellTp
-    // A structural target gives a different R every time, so bank the real one
-    // now. Scoring these as rrMult would silently invent results.
-    tR := buySignal ? buyRoom : sellRoom
-    tBar := bar_index
-    nTrades := nTrades + 1
-
-if inTrade and bar_index > tBar
+if inTrade
     hitSl = tIsBuy ? low <= tSl : high >= tSl
     hitTp = tIsBuy ? high >= tTp : low <= tTp
     if hitSl or hitTp
@@ -479,6 +499,12 @@ if inTrade and bar_index > tBar
         inTrade := false
         if hideDone
             f_clear()
+
+if (buySignal or sellSignal) and canTake
+    pending := true
+    pIsBuy := buySignal
+    pSl := buySignal ? buySl : sellSl
+    pTp := buySignal ? buyTp : sellTp
 
 var table stt = na
 if showStats and barstate.islast

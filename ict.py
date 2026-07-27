@@ -9,6 +9,11 @@ Run:  python ict.py XAUUSD 180 0.30 15      symbol, days, spread, timeframe(min)
       python ict.py XAUUSD 180 0.30 15 --tp=pool      target the next pool
       python ict.py XAUUSD 180 0.30 15 --tp=range --adr=1.3
       python ict.py XAUUSD 365 0.30 15 --sweep        grid search, 60/40 split
+      python ict.py XAUUSD 180 0.30 15 --manual       ignore the timeframe preset
+
+Settings default to the same per-timeframe ladder the Pine indicator applies on
+chart, so a backtest measures what you are actually looking at. --manual opts
+out and uses the bare IctParams defaults.
 
 The model:
   SWEEP        price takes out a prior swing; each pool is used once
@@ -487,6 +492,33 @@ def report(m: Market, p: IctParams, trades: list[Trade]) -> None:
     print("so treat anything under about +0.1R average as break-even.")
 
 
+# The same ladder the Pine indicator applies on chart. A faster chart is
+# noisier and pays a far larger share of its risk in spread (~18% on M1 against
+# ~2.5% on M15), so every threshold tightens as the bars get quicker. Kept here
+# so a backtest measures what the chart actually runs.
+TF_PRESET = {
+    1:  dict(pivot_len=20, arm_bars=10, min_run_len=4, cooldown_bars=20,
+             min_risk_atr=1.00, max_struct_rr=3.0, min_rr=1.8,
+             max_adr_used=1.15, require_close_back=True, tp_mode="pool"),
+    5:  dict(pivot_len=14, arm_bars=12, min_run_len=3, cooldown_bars=12,
+             min_risk_atr=0.80, max_struct_rr=4.0, min_rr=1.5,
+             max_adr_used=1.25, require_close_back=True, tp_mode="pool"),
+    15: dict(pivot_len=10, arm_bars=12, min_run_len=2, cooldown_bars=6,
+             min_risk_atr=0.50, max_struct_rr=5.0, min_rr=1.2,
+             max_adr_used=1.40, require_close_back=False, tp_mode="pool"),
+    30: dict(pivot_len=8, arm_bars=12, min_run_len=2, cooldown_bars=4,
+             min_risk_atr=0.50, max_struct_rr=6.0, min_rr=1.0,
+             max_adr_used=0.0, require_close_back=False, tp_mode="pool"),
+}
+
+
+def preset_for(tf_minutes: int) -> dict:
+    for k in (1, 5, 15):
+        if tf_minutes <= k:
+            return TF_PRESET[k]
+    return TF_PRESET[30]
+
+
 GRID = {
     "pivot_len": [5, 8, 12],
     "arm_bars": [6, 12, 20],
@@ -577,6 +609,9 @@ def main() -> int:
         return 1
 
     base = IctParams()
+    if "--manual" not in sys.argv:
+        base = replace(base, **preset_for(tf))
+        print(f"Preset for {TF_MAP[tf]}: {base.label()}")
     for a in sys.argv[1:]:
         if a.startswith("--tp="):
             base = replace(base, tp_mode=a.split("=", 1)[1])
