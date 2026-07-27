@@ -108,6 +108,25 @@ reports `per` (dollars per trade) alongside `avg_r`, and `ict.py --sweep`
 requires a setting to be positive in **both** before calling it robust. Only
 switch to R as the primary measure if lot size ever becomes risk-scaled.
 
+### Why the fast timeframes keep losing — two independent reasons
+
+Nothing on M1/M5 has ever survived out-of-sample here, and the swing sweep
+(D1/H4/H1→M15) is the only family that has. Two separate mechanisms, both
+working the same direction:
+
+1. **Spread is fixed in dollars; the move is not.** Gold spread ~$0.30 against
+   a 1.5×ATR stop is roughly **18% of risk on M1, 10% on M5, 2.5% on M15, 1.2%
+   on H1**. Faster timeframes also take more trades, so the toll is paid more
+   often. Both factors compound.
+2. **Signal-to-noise improves as √T.** Directional movement grows with time,
+   random movement with the square root of time, so the informative fraction of
+   a bar rises as √(timeframe). M15 is ~3.9× cleaner than M1 for free.
+
+The counterweight: **XAUUSD minimum lot is 0.1 and cannot go lower**, so dollar
+risk rises with stop distance — about $17 on M1, $121 on M15, $243 on H1. H1 has
+the best cost ratio but risks a lot per trade at a lot size that cannot be cut.
+**M15 is the floor and probably the sweet spot** for this account.
+
 ### A structural target needs a ceiling, not just a floor
 
 Pools are consumed once swept, so the nearest *unswept* pool can be a whole
