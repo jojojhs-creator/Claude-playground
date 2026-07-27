@@ -6,8 +6,9 @@ trade and can run over hundreds of days — the two things the on-chart results
 table cannot do.
 
 Run:  python ict.py XAUUSD 180 0.30 15      symbol, days, spread, timeframe(min)
-      python ict.py BTCUSD 180 12 15
-      python ict.py XAUUSD 365 0.30 15 --sweep     grid search, 60/40 split
+      python ict.py XAUUSD 180 0.30 15 --tp=pool      target the next pool
+      python ict.py XAUUSD 180 0.30 15 --tp=range --adr=1.3
+      python ict.py XAUUSD 365 0.30 15 --sweep        grid search, 60/40 split
 
 The model:
   SWEEP        price takes out a prior swing; each pool is used once
@@ -559,8 +560,19 @@ def main() -> int:
         print(f"Timeframe must be one of {sorted(TF_MAP)}")
         return 1
 
-    m = load(symbol, days, spread, tf, cfg)
     base = IctParams()
+    for a in sys.argv[1:]:
+        if a.startswith("--tp="):
+            base = replace(base, tp_mode=a.split("=", 1)[1])
+        elif a.startswith("--adr="):
+            base = replace(base, max_adr_used=float(a.split("=", 1)[1]))
+        elif a.startswith("--minrr="):
+            base = replace(base, min_rr=float(a.split("=", 1)[1]))
+    if base.tp_mode not in ("atr", "pool", "range"):
+        print("--tp must be atr, pool or range")
+        return 1
+
+    m = load(symbol, days, spread, tf, cfg)
     if "--sweep" in sys.argv:
         run_sweep(m, base)
     else:
