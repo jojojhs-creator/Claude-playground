@@ -18,6 +18,8 @@ Branch: `claude/mt5-telegram-trading-bot-rxcae1`
 | `bot.py` | Orchestrator: APScheduler scan cycle + position monitor. |
 | `backtest.py` | Replays current `.env` settings over history. **Use before any live change.** Also the engine (`load_market`/`simulate`) used by the sweep. |
 | `sweep.py` | Grid search with a 60/40 train/test split. Judge settings by the test column. |
+| `ict.py` | Backtest for the liquidity-sweep/CISD/IFVG model (the Pine indicator), with its own `--sweep`. Not wired into the live bot. |
+| `test_ict.py` | Regression guard for `ict.py`. numpy only, runs anywhere. |
 | `tradingview/*.pine` | Companion TradingView indicator (separate from the bot). |
 
 ## Modes (mutually exclusive, set in `.env`)
@@ -67,6 +69,25 @@ All M5 (`BALANCED_MODE`), 30–44 days, spread charged per trade.
    Every timeframe must be sized from the requested period, and the report must
    measure the window from the first bar with usable context
    (`MarketData.first_valid`), not the whole fetch.
+
+### Two tests that catch a lying backtester
+
+`test_ict.py` encodes the general defence against the bugs above. Both apply to
+`backtest.py` just as much as to `ict.py`:
+
+1. **Prefix equality.** Signals computed over `bars[0:k]` must be identical to
+   signals computed over the whole series and truncated at `k`. Any future bar
+   leaking into a decision breaks this. It is the cheapest possible lookahead
+   detector — it would have caught the trailing-stop bug immediately.
+2. **Null hypothesis.** On a driftless random walk the model must *lose* about
+   the spread. There is no edge in noise, so a positive expectancy there is
+   proof of a bug, never a discovery. `ict.py` scores −0.34R on noise; the
+   29.1% win rate against a theoretical 33.3% for a 2R target is the
+   stop-before-target rule biasing pessimistic, which is the correct direction
+   to be wrong in.
+
+Fills must always be the **next bar's open** (`backtest.py:315`). The signal is
+decided on a bar's close, which is a price you cannot transact at.
 
 ### Live bot ran a different strategy than the backtest
 
