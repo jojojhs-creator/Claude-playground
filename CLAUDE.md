@@ -165,6 +165,16 @@ risk rises with stop distance — about $17 on M1, $121 on M15, $243 on H1. H1 h
 the best cost ratio but risks a lot per trade at a lot size that cannot be cut.
 **M15 is the floor and probably the sweet spot** for this account.
 
+### Measuring whether a stop is too tight
+
+"The read was right but I got stopped" is testable, not a feeling. After every
+stop-out the indicator keeps watching the original target for `watchBars` and
+counts how often price gets there anyway — the **"Stopped, then TP"** row. Under
+~25% the stops are roughly right; over ~40% they are sitting in the noise and
+`stopRoom` should go up. It is the before/after number for any stop change,
+because widening a stop always raises the win rate on its own and that alone
+proves nothing.
+
 ### ...and a structural stop needs a floor, not just a ceiling
 
 The mirror image, found on the same M5 gold chart. A **continuation** entry is
@@ -216,6 +226,18 @@ exit plan, not competing ones.
   forming bar.
 - Indicators are all backward-looking, so `backtest.py` computes them once over
   the series — mathematically identical to per-bar recomputation, far faster.
+
+## CURRENT FOCUS: the TradingView strategy only
+
+The bot is **paused**. Do not change `bot.py`, `config.py`, `analyzer.py`,
+`risk_manager.py`, `telegram_bot.py` or the `.env` unless the user says the
+exact words **"lets go back to the bot"**. Work happens in
+`tradingview/liq_ifvg_cisd.pine`. `ict.py` stays available for measuring the
+Pine model — that is strategy work, not bot work.
+
+The user trades the indicator by hand and does **not** follow its TP/SL
+exactly, so on-chart results and account results measure different things. The
+account reflects their management; the results table reflects the levels.
 
 ## Working with this user
 
