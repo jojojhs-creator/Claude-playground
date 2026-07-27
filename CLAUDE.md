@@ -183,6 +183,11 @@ exit plan, not competing ones.
 
 They run everything on Windows via Git Bash and are not a developer — give
 exact click-by-click steps, one command at a time, and expect to paste whole
-file contents rather than describe edits. Settings changes need a **full bot
+file contents rather than describe edits.
+
+**Pine scripts: always send the COMPLETE file, every time.** They paste it into
+the TradingView editor wholesale and cannot hunt through it for "find this line,
+change that one". Never send a partial diff for `tradingview/*.pine`.
+They trade M1/M5/M15/M30, so those four are the timeframes that matter. Settings changes need a **full bot
 restart** to take effect (`.env` is read once at startup); this has been the
 cause of several "it didn't work" reports.
