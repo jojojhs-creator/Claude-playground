@@ -127,6 +127,18 @@ risk rises with stop distance — about $17 on M1, $121 on M15, $243 on H1. H1 h
 the best cost ratio but risks a lot per trade at a lot size that cannot be cut.
 **M15 is the floor and probably the sweet spot** for this account.
 
+### ...and a structural stop needs a floor, not just a ceiling
+
+The mirror image, found on the same M5 gold chart. A **continuation** entry is
+taken the moment price closes beyond the swept level, so entry sits a hair from
+its own anchor: a SELL at 4082.59 against a swept low near 4084.0 gave **$1.65
+of risk**. `max_risk_atr` is a ceiling — it only ever tightens the stop — so
+nothing stopped it landing inside one candle of noise. `min_risk_atr`
+(default 0.5) is the floor, clamped by the ceiling so the two cannot fight.
+
+Reversals do not have this problem: the anchor is the sweep wick, which is by
+definition some distance from the entry.
+
 ### A structural target needs a ceiling, not just a floor
 
 Pools are consumed once swept, so the nearest *unswept* pool can be a whole

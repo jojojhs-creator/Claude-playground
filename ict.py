@@ -63,6 +63,10 @@ class IctParams:
     min_fvg_atr: float = 0.25
     sl_buf_atr: float = 0.25
     max_risk_atr: float = 1.5
+    # max_risk_atr only ever tightens the stop. Without a floor, a continuation
+    # entry taken right at the break sits a hair from its anchor and gets a stop
+    # inside one candle of noise — right direction, stopped out anyway.
+    min_risk_atr: float = 0.5
     rr_mult: float = 2.0
     cooldown_bars: int = 5
 
@@ -331,6 +335,8 @@ def compute_signals(m: Market, p: IctParams):
         if want_buy:
             anchor = sweep_lo_px if rev_buy else swept_hi_lvl
             sl = max(anchor - atr[i] * p.sl_buf_atr, c[i] - atr[i] * p.max_risk_atr)
+            if p.min_risk_atr > 0:
+                sl = min(sl, c[i] - atr[i] * min(p.min_risk_atr, p.max_risk_atr))
             if c[i] - sl <= 0:
                 continue
             side[i], sl_a[i] = 1, sl
@@ -343,6 +349,8 @@ def compute_signals(m: Market, p: IctParams):
         else:
             anchor = sweep_hi_px if rev_sell else swept_lo_lvl
             sl = min(anchor + atr[i] * p.sl_buf_atr, c[i] + atr[i] * p.max_risk_atr)
+            if p.min_risk_atr > 0:
+                sl = max(sl, c[i] + atr[i] * min(p.min_risk_atr, p.max_risk_atr))
             if sl - c[i] <= 0:
                 continue
             side[i], sl_a[i] = -1, sl

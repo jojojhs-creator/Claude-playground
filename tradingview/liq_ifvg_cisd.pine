@@ -52,6 +52,7 @@ fvgExtend = input.int(40, "Stop extending a zone after (bars)", minval=5, group=
 // ── Risk ──────────────────────────────────────────────────────────────────────
 slBufAtr = input.float(0.25, "Stop beyond the level (x ATR)", minval=0.0, step=0.05, group="Risk")
 maxRiskAtr = input.float(1.5, "Cap risk at (x ATR from entry)", minval=0.3, step=0.1, group="Risk")
+minRiskAtr = input.float(0.5, "Floor risk at (x ATR from entry, 0 = off)", minval=0.0, step=0.05, group="Risk", tooltip="A continuation entry sits right next to the level it just broke, so the structural stop can land inside one candle of noise. This widens it to something the market cannot hit by accident. Capped by the maximum above.")
 tpMode = input.string("Next liquidity pool", "Target taken from", options=["ATR multiple", "Next liquidity pool", "Day range"], group="Risk", tooltip="ATR multiple ignores the chart. The other two read a real level off it and will decline the trade if that level is too close.")
 rrMult = input.float(2.0, "  ATR mode: target = risk x", minval=0.5, step=0.5, group="Risk")
 minRR = input.float(1.0, "  Structural: skip if target is closer than (R)", minval=0.1, step=0.1, group="Risk")
@@ -330,8 +331,14 @@ rawSell = (revSell or contSell) and cooled and ifvgSellOk
 
 buyAnchor = revBuy ? sweepLowPx : sweptHiLvl
 sellAnchor = revSell ? sweepHighPx : sweptLoLvl
-buySl = math.max(buyAnchor - atrV * slBufAtr, close - atrV * maxRiskAtr)
-sellSl = math.min(sellAnchor + atrV * slBufAtr, close + atrV * maxRiskAtr)
+buySlRaw = math.max(buyAnchor - atrV * slBufAtr, close - atrV * maxRiskAtr)
+sellSlRaw = math.min(sellAnchor + atrV * slBufAtr, close + atrV * maxRiskAtr)
+
+// The floor. maxRiskAtr only ever tightens the stop, so without this a
+// continuation entry taken right at the break gets a stop inside bar noise.
+floorAtr = math.min(minRiskAtr, maxRiskAtr)
+buySl = floorAtr > 0 ? math.min(buySlRaw, close - atrV * floorAtr) : buySlRaw
+sellSl = floorAtr > 0 ? math.max(sellSlRaw, close + atrV * floorAtr) : sellSlRaw
 buyRisk = close - buySl
 sellRisk = sellSl - close
 

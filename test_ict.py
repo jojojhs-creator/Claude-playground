@@ -143,6 +143,19 @@ def main() -> int:
                 fails.append(f"{tpm.upper()} MIN_RR: took a trade below min_rr")
                 break
 
+    # 7b. No stop may sit closer than the risk floor, and the floor must never
+    #     override the ceiling.
+    for mr in (0.5, 1.0):
+        q = replace(p, min_risk_atr=mr)
+        sd, sl2, _, _, _ = compute_signals(m, q)
+        idx = np.where(sd != 0)[0]
+        dist = np.abs(m.c[idx] - sl2[idx]) / m.atr[idx]
+        lo = min(mr, q.max_risk_atr)
+        if len(idx) and dist.min() < lo - 1e-9:
+            fails.append(f"RISK FLOOR: stop at {dist.min():.3f} ATR, floor {lo}")
+        if len(idx) and dist.max() > q.max_risk_atr + 1e-9:
+            fails.append(f"RISK CEILING: stop at {dist.max():.3f} ATR, cap {q.max_risk_atr}")
+
     # 8b. A tighter R cap can only shrink targets, never grow them.
     wide = {t.bar: t.tp for t in simulate(m, replace(p, tp_mode="pool", max_struct_rr=20))}
     for t in simulate(m, replace(p, tp_mode="pool", max_struct_rr=3)):
