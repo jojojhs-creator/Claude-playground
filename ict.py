@@ -10,6 +10,9 @@ Run:  python ict.py XAUUSD 180 0.30 15      symbol, days, spread, timeframe(min)
       python ict.py XAUUSD 180 0.30 15 --tp=range --adr=1.3
       python ict.py XAUUSD 365 0.30 15 --sweep        grid search, 60/40 split
       python ict.py XAUUSD 180 0.30 15 --manual       ignore the timeframe preset
+      python ict.py XAUUSD 365 0.30 15 --mode=cont --arm=6 --tp=atr --rr=3
+        override individual settings: --piv --arm --run --rr --mode --tp
+        --adr --minrr --maxrr
 
 Settings default to the same per-timeframe ladder the Pine indicator applies on
 chart, so a backtest measures what you are actually looking at. --manual opts
@@ -534,11 +537,10 @@ def run_sweep(m: Market, base: IctParams) -> None:
     n = len(m.c)
     split = int(n * 0.60)
     combos = list(itertools.product(*GRID.values()))
-    print(f"\nTrain bars 0–{split} | Test bars {split}–{n}")
-    print(f"Testing {len(combos)} combinations…\n")
-
     # rr_mult only means anything for the atr target, so drop the duplicates
     combos = [c for c in combos if c[5] == "atr" or c[3] == GRID["rr_mult"][0]]
+    print(f"\nTrain bars 0–{split} | Test bars {split}–{n}")
+    print(f"Testing {len(combos)} combinations…\n")
 
     rows = []
     cache: dict = {}
@@ -621,6 +623,18 @@ def main() -> int:
             base = replace(base, min_rr=float(a.split("=", 1)[1]))
         elif a.startswith("--maxrr="):
             base = replace(base, max_struct_rr=float(a.split("=", 1)[1]))
+        elif a.startswith("--piv="):
+            base = replace(base, pivot_len=int(a.split("=", 1)[1]))
+        elif a.startswith("--arm="):
+            base = replace(base, arm_bars=int(a.split("=", 1)[1]))
+        elif a.startswith("--run="):
+            base = replace(base, min_run_len=int(a.split("=", 1)[1]))
+        elif a.startswith("--rr="):
+            base = replace(base, rr_mult=float(a.split("=", 1)[1]))
+        elif a.startswith("--mode="):
+            mode = a.split("=", 1)[1]
+            base = replace(base, trade_reversal=mode in ("rev", "both"),
+                           trade_continuation=mode in ("cont", "both"))
     if base.tp_mode not in ("atr", "pool", "range"):
         print("--tp must be atr, pool or range")
         return 1

@@ -51,6 +51,44 @@ All M5 (`BALANCED_MODE`), 30–44 days, spread charged per trade.
   always pass an explicit spread when the market is shut).
 - Gold M5 median ATR **$4.67**; at 0.2 lot a 1.5×ATR stop is **$140**.
 
+### The ICT model measured: no edge (XAUUSD M15, 0.2 lot, spread $0.30)
+
+Ran the per-timeframe preset over 273 days, and a 540-combination sweep with a
+60/40 split over 365 days.
+
+| Run | Result |
+|---|---|
+| Preset `piv10 arm12 run2 tp:pool rev+cont adr<1.4` | 300 trades, 25.3% win, PF 0.94, **−$3,429**, max DD **−$8,540** |
+| ...of which REVERSAL | 183 trades, 24.6% win, avg −0.16R, **−$6,106** |
+| ...of which CONTINUATION | 117 trades, 26.5% win, avg +0.04R, **+$2,677** |
+
+**8 of 540 combinations "held up out-of-sample" — that is what chance produces.**
+The combinations overlap heavily so the effective number of independent tests is
+far below 540, but 8 survivors is still within the range noise generates. They
+also disagree with each other (`piv5` and `piv12`, `rev` and `cont` and
+`rev+cont` all appear), and a genuine edge shows a coherent neighbourhood of
+nearby settings rather than scattered singletons. **Do not trade this model on
+the strength of that list.**
+
+Two patterns are consistent enough to be worth a focused follow-up, with a small
+grid so the multiple-comparisons problem shrinks:
+
+1. **`arm6` appears in all 12 top-by-train rows and all 8 survivors** (grid was
+   6/12/20). A short arming window means the CISD must follow the sweep
+   promptly, which is mechanically sensible — a stale sweep is not a trap.
+2. **Continuation beats reversal**, in the baseline split above and in 10 of the
+   12 top-by-train rows. The classic ICT premise is the reversal; here it is the
+   one losing money.
+
+**The structural targets did not survive.** `tp:pool` and `tp:range` fill the
+top-by-train table and then vanish from the out-of-sample list, which is
+textbook overfitting — they fit history better and generalised worse. The plain
+`tp:atr` × 3 is what survived. The reasoning for structural targets was sound
+and the data still rejected it; the 60/40 split is what caught it.
+
+Spread was **53%** of the baseline loss (300 × $6.00 = $1,800 of $3,429), which
+is the same story as the BTCUSD M5 run.
+
 ### Two backtester bugs that produced fake profits — do not reintroduce
 
 1. **Intrabar lookahead in the trailing stop.** Raising the peak from a bar's
