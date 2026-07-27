@@ -12,6 +12,19 @@
 //   CONTINUATION — liquidity taken and price HOLDS beyond it. Stop back at the
 //                  level, since falling inside proves the breakout failed.
 //
+// The TARGET can come from the chart instead of a fixed multiple:
+//   ATR multiple        risk x RR. Blind — it demands the same multiple whether
+//                       or not price has anywhere to go.
+//   Next liquidity pool the nearest unswept swing the other side of entry.
+//                       Resting stops are what actually draws price.
+//   Day range           the 24h high/low. The right target in a rotation.
+// A structural target that is closer than the minimum R:R DECLINES the setup
+// rather than inventing a target to fit the ratio. Stops are unchanged — they
+// were always structural, anchored to the sweep itself.
+//
+// The impact filter reads how far the last 24h has already travelled against a
+// normal day, so a late entry into a spent session can be skipped.
+//
 // Chart hygiene: every drawing belonging to a trade is tracked, so a finished
 // or superseded setup can be erased instead of accumulating forever.
 //
@@ -39,7 +52,12 @@ fvgExtend = input.int(40, "Stop extending a zone after (bars)", minval=5, group=
 // ── Risk ──────────────────────────────────────────────────────────────────────
 slBufAtr = input.float(0.25, "Stop beyond the level (x ATR)", minval=0.0, step=0.05, group="Risk")
 maxRiskAtr = input.float(1.5, "Cap risk at (x ATR from entry)", minval=0.3, step=0.1, group="Risk")
-rrMult = input.float(2.0, "Target = risk x", minval=0.5, step=0.5, group="Risk")
+tpMode = input.string("Next liquidity pool", "Target taken from", options=["ATR multiple", "Next liquidity pool", "Day range"], group="Risk", tooltip="ATR multiple ignores the chart. The other two read a real level off it and will decline the trade if that level is too close.")
+rrMult = input.float(2.0, "  ATR mode: target = risk x", minval=0.5, step=0.5, group="Risk")
+minRR = input.float(1.0, "  Structural: skip if target is closer than (R)", minval=0.1, step=0.1, group="Risk")
+tpBufAtr = input.float(0.10, "  Structural: take profit before the level (x ATR)", minval=0.0, step=0.05, group="Risk")
+maxAdrUsed = input.float(0.0, "Skip when 24h range exceeds (x normal, 0 = off)", minval=0.0, step=0.1, group="Risk", tooltip="1.0 is an average day. At 1.3 the session has already run 30% further than usual and is unlikely to pay out a fresh target.")
+adrDays = input.int(14, "  Days used for the normal range", minval=3, group="Risk")
 cooldownBars = input.int(5, "Min bars between signals", minval=0, group="Risk")
 confirmedOnly = input.bool(true, "Only signal on closed candles", group="Risk")
 
@@ -58,6 +76,18 @@ tradeBars = input.int(30, "Trade line length (bars)", minval=5, group="Chart")
 showStats = input.bool(true, "Results table", group="Chart")
 
 atrV = ta.atr(14)
+
+// ── How stretched is the session already ──────────────────────────────────────
+// A rolling 24h window rather than the daily bar, so nothing has to be pulled
+// from a higher timeframe and there is no repainting to reason about.
+barsPerDay = math.max(4, math.round(1440 / math.max(1, timeframe.in_seconds() / 60)))
+adrLen = math.min(2000, barsPerDay * adrDays)
+dayHi = ta.highest(high, barsPerDay)
+dayLo = ta.lowest(low, barsPerDay)
+dayRange = dayHi - dayLo
+adrTypical = ta.sma(dayRange, adrLen)
+dayStretch = adrTypical > 0 ? dayRange / adrTypical : float(na)
+adrOk = maxAdrUsed <= 0 or na(dayStretch) or dayStretch <= maxAdrUsed
 
 // ── Liquidity pools ───────────────────────────────────────────────────────────
 ph = ta.pivothigh(high, pivotLen, pivotLen)
@@ -263,6 +293,26 @@ if array.size(fTop) > 0
             box.set_right(fx, bar_index + 1)
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
+// Nearest untouched pool on the far side of price. Swept pools are already
+// removed from these arrays above, so what is left is genuinely unclaimed.
+f_nearestAbove(arr, px) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v > px and (na(best) or v < best)
+                best := v
+    best
+
+f_nearestBelow(arr, px) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v < px and (na(best) or v > best)
+                best := v
+    best
+
 var int lastSigBar = -9999
 cooled = bar_index - lastSigBar >= cooldownBars
 
@@ -283,14 +333,37 @@ buySl = math.max(buyAnchor - atrV * slBufAtr, close - atrV * maxRiskAtr)
 sellSl = math.min(sellAnchor + atrV * slBufAtr, close + atrV * maxRiskAtr)
 buyRisk = close - buySl
 sellRisk = sellSl - close
-buyTp = close + buyRisk * rrMult
-sellTp = close - sellRisk * rrMult
+
+// Where the target comes from. The structural ones can return na — that is a
+// real answer meaning "the chart is not offering anything", not a failure.
+isAtrTp = tpMode == "ATR multiple"
+poolTgtBuy = f_nearestAbove(poolHi, close)
+poolTgtSell = f_nearestBelow(poolLo, close)
+
+buyTp = isAtrTp ? close + buyRisk * rrMult : tpMode == "Next liquidity pool" ? poolTgtBuy - atrV * tpBufAtr : dayHi - atrV * tpBufAtr
+sellTp = isAtrTp ? close - sellRisk * rrMult : tpMode == "Next liquidity pool" ? poolTgtSell + atrV * tpBufAtr : dayLo + atrV * tpBufAtr
+
+// How much room the chart is actually giving, in R
+buyRoom = buyRisk > 0 and not na(buyTp) ? (buyTp - close) / buyRisk : float(na)
+sellRoom = sellRisk > 0 and not na(sellTp) ? (close - sellTp) / sellRisk : float(na)
+buyRoomOk = isAtrTp or (not na(buyRoom) and buyRoom >= minRR)
+sellRoomOk = isAtrTp or (not na(sellRoom) and sellRoom >= minRR)
 
 barOk = not confirmedOnly or barstate.isconfirmed
-buyOk = rawBuy and buyRisk > 0 and barOk
-sellOk = rawSell and sellRisk > 0 and barOk
+buyOk = rawBuy and buyRisk > 0 and barOk and buyRoomOk and adrOk
+sellOk = rawSell and sellRisk > 0 and barOk and sellRoomOk and adrOk
 buySignal = buyOk and not sellOk
 sellSignal = sellOk and not buyOk
+
+// Why a valid sweep+CISD did not become a trade — counted, so a quiet chart
+// is explainable instead of mysterious.
+var int nNoRoom = 0
+var int nAdrBlocked = 0
+setupReady = (rawBuy or rawSell) and barOk and (buyRisk > 0 or sellRisk > 0)
+if setupReady and not adrOk
+    nAdrBlocked := nAdrBlocked + 1
+if setupReady and adrOk and ((rawBuy and not buyRoomOk) or (rawSell and not sellRoomOk))
+    nNoRoom := nNoRoom + 1
 
 // ── Drawing, with every object tracked so it can be erased ───────────────────
 var array<line> tLines = array.new_line()
@@ -305,7 +378,7 @@ f_clear() =>
     while array.size(tBoxes) > 0
         box.delete(array.pop(tBoxes))
 
-f_draw(isBuy, entry, tp, sl, cisdLvl, kind) =>
+f_draw(isBuy, entry, tp, sl, cisdLvl, kind, room) =>
     col = isBuy ? color.teal : color.red
     x1 = bar_index
     x2 = bar_index + tradeBars
@@ -313,7 +386,7 @@ f_draw(isBuy, entry, tp, sl, cisdLvl, kind) =>
     array.push(tLines, line.new(x1, tp, x2, tp, color=color.new(color.teal, 25), style=line.style_dashed, width=1))
     array.push(tLines, line.new(x1, sl, x2, sl, color=color.new(color.red, 25), style=line.style_dashed, width=1))
     array.push(tLabels, label.new(x2, entry, (isBuy ? "▲ BUY " : "▼ SELL ") + kind + " " + str.tostring(entry, format.mintick), style=label.style_label_left, color=color.new(col, 15), textcolor=color.white, size=size.small))
-    array.push(tLabels, label.new(x2, tp, "TP " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.teal, 45), textcolor=color.white, size=size.tiny))
+    array.push(tLabels, label.new(x2, tp, "TP " + str.tostring(tp, format.mintick) + (na(room) ? "" : "  " + str.tostring(room, "#.#") + "R"), style=label.style_label_left, color=color.new(color.teal, 45), textcolor=color.white, size=size.tiny))
     array.push(tLabels, label.new(x2, sl, "SL " + str.tostring(sl, format.mintick), style=label.style_label_left, color=color.new(color.red, 45), textcolor=color.white, size=size.tiny))
     if showPosBox
         array.push(tBoxes, box.new(x1, math.max(tp, entry), x2, math.min(tp, entry), border_color=color.new(color.teal, 85), bgcolor=color.new(color.teal, 92)))
@@ -325,12 +398,12 @@ f_draw(isBuy, entry, tp, sl, cisdLvl, kind) =>
 if buySignal
     if hidePast
         f_clear()
-    f_draw(true, close, buyTp, buySl, cisdBullLevel, revBuy ? "rev" : "cont")
+    f_draw(true, close, buyTp, buySl, cisdBullLevel, revBuy ? "rev" : "cont", buyRoom)
     lastSigBar := bar_index
 if sellSignal
     if hidePast
         f_clear()
-    f_draw(false, close, sellTp, sellSl, cisdBearLevel, revSell ? "rev" : "cont")
+    f_draw(false, close, sellTp, sellSl, cisdBearLevel, revSell ? "rev" : "cont", sellRoom)
     lastSigBar := bar_index
 
 // ── Outcome tracking ──────────────────────────────────────────────────────────
@@ -339,6 +412,7 @@ var bool tIsBuy = false
 var float tSl = na
 var float tTp = na
 var int tBar = na
+var float tR = na
 var int nTrades = 0
 var int nWins = 0
 var int nLosses = 0
@@ -349,6 +423,9 @@ if (buySignal or sellSignal) and not inTrade
     tIsBuy := buySignal
     tSl := buySignal ? buySl : sellSl
     tTp := buySignal ? buyTp : sellTp
+    // A structural target gives a different R every time, so bank the real one
+    // now. Scoring these as rrMult would silently invent results.
+    tR := buySignal ? buyRoom : sellRoom
     tBar := bar_index
     nTrades := nTrades + 1
 
@@ -356,7 +433,7 @@ if inTrade and bar_index > tBar
     hitSl = tIsBuy ? low <= tSl : high >= tSl
     hitTp = tIsBuy ? high >= tTp : low <= tTp
     if hitSl or hitTp
-        sumR := sumR + (hitSl ? -1.0 : rrMult)
+        sumR := sumR + (hitSl ? -1.0 : na(tR) ? rrMult : tR)
         if hitSl
             nLosses := nLosses + 1
         else
@@ -368,7 +445,7 @@ if inTrade and bar_index > tBar
 var table stt = na
 if showStats and barstate.islast
     table.delete(stt)
-    stt := table.new(position.top_right, 2, 5, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    stt := table.new(position.top_right, 2, 8, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
     wr = nTrades > 0 ? nWins / nTrades * 100 : 0.0
     ex = nTrades > 0 ? sumR / nTrades : 0.0
     table.cell(stt, 0, 0, "RESULTS", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
@@ -381,6 +458,16 @@ if showStats and barstate.islast
     table.cell(stt, 1, 3, str.tostring(nWins) + " / " + str.tostring(nLosses), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
     table.cell(stt, 0, 4, "Net R / avg", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 1, 4, str.tostring(sumR, "#.1") + "R / " + str.tostring(ex, "#.2") + "R", text_color=sumR > 0 ? color.teal : color.red, bgcolor=color.new(color.black, 70), text_size=size.small)
+
+    // Live read on the session, and why setups were passed over
+    stretchTxt = na(dayStretch) ? "n/a" : str.tostring(dayStretch, "#.00") + "x"
+    stretchCol = na(dayStretch) ? color.gray : dayStretch >= 1.3 ? color.red : dayStretch >= 1.0 ? color.orange : color.teal
+    table.cell(stt, 0, 5, "24h vs normal", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 5, stretchTxt, text_color=stretchCol, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 0, 6, "Passed: no room", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 6, str.tostring(nNoRoom), text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 0, 7, "Passed: day spent", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 7, str.tostring(nAdrBlocked), text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
 
 alertcondition(buySignal, "BUY", "BUY — sweep + CISD on {{ticker}} @ {{close}}")
 alertcondition(sellSignal, "SELL", "SELL — sweep + CISD on {{ticker}} @ {{close}}")
