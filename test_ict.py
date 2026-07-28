@@ -29,7 +29,7 @@ for _name, _attrs in (("config", {"AppConfig": object, "load_config": lambda: No
 
 from dataclasses import replace  # noqa: E402
 
-from ict import IctParams, Market, _atr, compute_signals, simulate, stats  # noqa: E402
+from ict import IctParams, Market, _atr, _ema, compute_signals, simulate, stats  # noqa: E402
 
 
 def _mk(o, h, l, c, spread=0.30):
@@ -164,6 +164,19 @@ def main() -> int:
                    ("poke", replace(base_rev, sweep_max_atr=0.5))):
         if len(simulate(m, q)) > n0:
             fails.append(f"{tag.upper()} FILTER: added reversal trades ({n0} -> {len(simulate(m, q))})")
+    # ...and the trend filter must actually BIND: every surviving reversal has
+    # to agree with the EMA. A filter that removes nothing also "never adds".
+    q = replace(base_rev, trend_ema=50)
+    e = _ema(m.c, 50)
+    for t2 in simulate(m, q):
+        k = t2.bar
+        if np.isnan(e[k]):
+            continue
+        if (m.c[k] <= e[k]) if t2.is_buy else (m.c[k] >= e[k]):
+            fails.append(f"TREND FILTER: took a {'buy' if t2.is_buy else 'sell'} "
+                         f"on the wrong side of the EMA")
+            break
+
     cont = replace(p, trade_reversal=False)
     if len(simulate(m, cont)) != len(simulate(m, replace(cont, trend_ema=200))):
         fails.append("TREND FILTER: changed continuation trades, should not")

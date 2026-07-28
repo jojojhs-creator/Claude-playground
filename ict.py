@@ -413,9 +413,13 @@ def compute_signals(m: Market, p: IctParams):
 
         # Reversals only in the direction the larger move already supports.
         # Continuations need no such gate — they are with the move by design.
-        trend_up = None if np.isnan(ema[i]) else c[i] > ema[i]
-        rev_ok_buy = trend_up is not False
-        rev_ok_sell = trend_up is not True
+        # NB: compare with < / > directly. `c[i] > ema[i]` is a numpy bool and
+        # `np.False_ is not False` is True, so an `is` test here silently
+        # passes everything — which is exactly the bug this replaced.
+        rev_ok_buy = rev_ok_sell = True
+        if p.trend_ema > 0 and not np.isnan(ema[i]):
+            rev_ok_buy = bool(c[i] > ema[i])
+            rev_ok_sell = bool(c[i] < ema[i])
         rev_buy = (p.trade_reversal and bull_armed and fired_bull
                    and not np.isnan(sweep_lo_px) and rev_ok_buy)
         rev_sell = (p.trade_reversal and bear_armed and fired_bear

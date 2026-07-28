@@ -184,6 +184,51 @@ Derived from the same three tables (avg winner from `netR = w·avgwin − l`):
 
 Always read `avg` as `Net R ÷ Trades` rather than trusting a glance at the cell.
 
+### Gold daily via PAXG — free 24/7 gold data, and the first positive result
+
+Alpha Vantage's free tier paywalls all intraday and `outputsize=full`, and
+`GOLD_SILVER_HISTORY` returns close only (no wicks, so no sweeps). **But
+`DIGITAL_CURRENCY_DAILY` is free with full history, and PAXG is a token backed
+1:1 by physical gold that trades 24/7** — 2,514 daily bars back to 2019, real
+OHLC, no session gaps. It printed 4,057 the day XAUUSD printed ~4,045.
+
+Everything is scored against a **direction-matched random baseline**: same
+1.5xATR stop and 2R target, entries chosen at random on the same bars. Gold rose
+1,515 -> 4,057, so random longs alone earn **+0.395R** and random shorts
+**−0.321R**. Raw average R is meaningless here; only the excess over that
+baseline is evidence.
+
+| Variant | n | win | avg R | EDGE |
+|---|---|---|---|---|
+| rev + cont (current) | 77 | 45.5% | +0.364 | +0.304 |
+| rev only | 55 | 38.2% | +0.145 | +0.206 |
+| cont only | 42 | 42.9% | +0.286 | +0.164 |
+| **rev + trend EMA200** | 32 | 46.9% | +0.406 | **+0.325** |
+| **rev + cont + EMA200** | 59 | 49.2% | +0.475 | **+0.347** |
+| rev + poke 0.5 | 45 | 31.1% | −0.067 | **−0.016** |
+
+- **The trend filter works.** Gating reversals on EMA200 lifts their edge from
+  +0.206 to +0.325, and the best combination is both premises with the filter on.
+  This agrees with the only other positive result here — the opening-range
+  indicator with an HTF gate at avg +0.2R — so two independent tests now point
+  the same way.
+- **The sweep-overshoot filter HURTS.** +0.206 -> −0.016. Leave `sweep_max_atr`
+  at 0. Reasoning was sound, data says no.
+- `EMA100` scored +0.653 on **24** trades. That is too few; treat it as noise
+  amplification, not a better setting.
+- ~59 trades at +0.347 is about **1.9 sigma** — suggestive, not established, and
+  on DAILY bars. It does not validate the M15 setup.
+
+### The bug that made a filter a no-op
+
+`trend_up = c[i] > ema[i]` yields a **numpy bool**, and `np.False_ is not False`
+evaluates **True** — so `rev_ok_buy = trend_up is not False` passed everything
+and the filter removed zero trades at every EMA length. It was only caught
+because three different EMA lengths returned byte-identical results, which is
+not something a real filter does. **Never use `is` against a numpy scalar.**
+`test_ict.py` now asserts every surviving reversal actually sits on the correct
+side of the EMA — "removes nothing" also satisfies "never adds".
+
 ### Why reversals lose, and the two candidate fixes
 
 Reversals ran 183 trades at −0.16R (−$6,106) while continuations made +$2,677.
