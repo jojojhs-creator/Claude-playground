@@ -81,6 +81,8 @@ showPending = input.bool(true, "Live CISD level while armed", group="Chart")
 showPosBox = input.bool(true, "Shade the position", group="Chart")
 tradeBars = input.int(30, "Trade line length (bars)", minval=5, group="Chart")
 showStats = input.bool(true, "Results table", group="Chart")
+tablePos = input.string("Top right", "Table position", options=["Top right", "Bottom right", "Top left", "Bottom left", "Middle right"], group="Chart")
+spreadPx = input.float(0.30, "Spread, in price (0 = ignore costs)", minval=0.0, step=0.01, group="Chart", tooltip="Charged against every trade. Gold is about 0.25-0.30. This is the single biggest cost in the model and leaving it out is what makes a losing setup look breakeven — a tight stop pays a far larger share of its risk in spread than a wide one.")
 watchBars = input.int(60, "Measure: bars watched after a stop", minval=5, group="Chart", tooltip="After a stop-out, keep watching this many bars to see whether the original target would have been reached anyway. A high 'Stopped, then TP' count means the stop is too tight — the read was right and the stop was in the noise.")
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
@@ -457,6 +459,8 @@ var int nWins = 0
 var int nLosses = 0
 var int nGapped = 0
 var float sumR = 0.0
+var float sumCostR = 0.0
+var float tRisk = na
 
 // Was the stop the problem, or was the read wrong? After a stop-out, keep
 // watching the original target. If price gets there anyway, the direction was
@@ -513,6 +517,9 @@ f_alertText(isBuy, kind, entry, sl, tp, room) =>
 
 // Telegram's API wants a JSON body, so a webhook can post straight to the chat
 // with nothing in between. Single quotes here keep the JSON's double quotes.
+f_tablePos() =>
+    tablePos == "Bottom right" ? position.bottom_right : tablePos == "Top left" ? position.top_left : tablePos == "Bottom left" ? position.bottom_left : tablePos == "Middle right" ? position.middle_right : position.top_right
+
 f_wrap(txt) =>
     alertFmt == "Telegram JSON" ? '{"chat_id":"' + tgChatId + '","text":"' + txt + '"}' : txt
 
@@ -542,6 +549,7 @@ if pending and not inTrade
         tSl := pSl
         tTp := pTp
         tR := (pIsBuy ? pTp - open : open - pTp) / fillRisk
+        tRisk := fillRisk
         nTrades := nTrades + 1
     else
         nGapped := nGapped + 1      // opened beyond its own stop
@@ -551,7 +559,11 @@ if inTrade
     hitSl = tIsBuy ? low <= tSl : high >= tSl
     hitTp = tIsBuy ? high >= tTp : low <= tTp
     if hitSl or hitTp
-        sumR := sumR + (hitSl ? -1.0 : na(tR) ? rrMult : tR)
+        // Spread is paid on every trade either way. As a share of R it is far
+        // heavier on a tight stop, which is why fast charts bleed.
+        costR = spreadPx > 0 and tRisk > 0 ? spreadPx / tRisk : 0.0
+        sumCostR := sumCostR + costR
+        sumR := sumR + (hitSl ? -1.0 : na(tR) ? rrMult : tR) - costR
         if hitSl
             nLosses := nLosses + 1
             watching := true
@@ -580,7 +592,7 @@ if (buySignal or sellSignal) and canTake
 var table stt = na
 if showStats and barstate.islast
     table.delete(stt)
-    stt := table.new(position.top_right, 2, 9, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    stt := table.new(f_tablePos(), 2, 10, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
     wr = nTrades > 0 ? nWins / nTrades * 100 : 0.0
     ex = nTrades > 0 ? sumR / nTrades : 0.0
     table.cell(stt, 0, 0, "RESULTS", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
@@ -593,21 +605,23 @@ if showStats and barstate.islast
     table.cell(stt, 1, 3, str.tostring(nWins) + " / " + str.tostring(nLosses), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
     table.cell(stt, 0, 4, "Net R / avg", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 1, 4, str.tostring(sumR, "#.1") + "R / " + str.tostring(ex, "#.2") + "R", text_color=sumR > 0 ? color.teal : color.red, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(stt, 0, 5, "of which spread", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 5, spreadPx <= 0 ? "not charged" : "-" + str.tostring(sumCostR, "#.1") + "R  (" + str.tostring(nTrades > 0 ? sumCostR / nTrades : 0, "#.2") + "R/trade)", text_color=spreadPx <= 0 ? color.orange : color.gray, bgcolor=color.new(color.black, 75), text_size=size.tiny)
 
     // Live read on the session, and why setups were passed over
     stretchTxt = na(dayStretch) ? "n/a" : str.tostring(dayStretch, "#.00") + "x"
     stretchCol = na(dayStretch) ? color.gray : dayStretch >= 1.3 ? color.red : dayStretch >= 1.0 ? color.orange : color.teal
-    table.cell(stt, 0, 5, "24h vs normal", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
-    table.cell(stt, 1, 5, stretchTxt, text_color=stretchCol, bgcolor=color.new(color.black, 75), text_size=size.small)
-    table.cell(stt, 0, 6, "Passed over", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
-    table.cell(stt, 1, 6, str.tostring(nNoRoom) + " room · " + str.tostring(nAdrBlocked) + " day · " + str.tostring(nGapped) + " gap", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.tiny)
+    table.cell(stt, 0, 6, "24h vs normal", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 6, stretchTxt, text_color=stretchCol, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 0, 7, "Passed over", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 7, str.tostring(nNoRoom) + " room · " + str.tostring(nAdrBlocked) + " day · " + str.tostring(nGapped) + " gap", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.tiny)
     // Stops that were hit while the read was actually right
     stpPct = nLosses > 0 ? nStopThenTp / nLosses * 100 : 0.0
     stpCol = stpPct >= 40 ? color.red : stpPct >= 25 ? color.orange : color.teal
-    table.cell(stt, 0, 7, "Stopped, then TP", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
-    table.cell(stt, 1, 7, str.tostring(nStopThenTp) + " of " + str.tostring(nLosses) + "  (" + str.tostring(stpPct, "#.0") + "%)", text_color=stpCol, bgcolor=color.new(color.black, 75), text_size=size.tiny)
-    table.cell(stt, 0, 8, autoTf ? "Auto " + tfName + " · " + strictness : "Manual", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
-    table.cell(stt, 1, 8, "piv " + str.tostring(pivotLenX) + " / run " + str.tostring(minRunLenX) + " / " + str.tostring(minRRX, "#.0") + "-" + str.tostring(maxStructRRX, "#.0") + "R / stop x" + str.tostring(stopRoom, "#.#"), text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.tiny)
+    table.cell(stt, 0, 8, "Stopped, then TP", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 8, str.tostring(nStopThenTp) + " of " + str.tostring(nLosses) + "  (" + str.tostring(stpPct, "#.0") + "%)", text_color=stpCol, bgcolor=color.new(color.black, 75), text_size=size.tiny)
+    table.cell(stt, 0, 9, autoTf ? "Auto " + tfName + " · " + strictness : "Manual", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(stt, 1, 9, "piv " + str.tostring(pivotLenX) + " / run " + str.tostring(minRunLenX) + " / " + str.tostring(minRRX, "#.0") + "-" + str.tostring(maxStructRRX, "#.0") + "R / stop x" + str.tostring(stopRoom, "#.#"), text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.tiny)
 
 alertcondition(buySignal, "BUY", "BUY — sweep + CISD on {{ticker}} @ {{close}}")
 alertcondition(sellSignal, "SELL", "SELL — sweep + CISD on {{ticker}} @ {{close}}")

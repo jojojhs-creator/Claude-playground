@@ -165,6 +165,25 @@ risk rises with stop distance — about $17 on M1, $121 on M15, $243 on H1. H1 h
 the best cost ratio but risks a lot per trade at a lot size that cannot be cut.
 **M15 is the floor and probably the sweet spot** for this account.
 
+### On-chart R without spread is not a result
+
+The Pine results table scored R with no cost until the spread input was added.
+On XAUUSD Loose that read **M15 −0.02R, M5 −0.03R, M1 −0.22R per trade** — the
+first two look like breakeven and are not. Spread as a share of R scales with
+how tight the stop is, so on M15 (risk ~$2–4) it is roughly 0.1R per trade and
+on M1 (risk ~$0.8) roughly 0.35R. That gap is the whole difference between the
+chart reading "nearly flat" and `ict.py` reporting −$3,429.
+
+Derived from the same three tables (avg winner from `netR = w·avgwin − l`):
+
+| Chart | n | win | avg winner | breakeven win | gap | Stopped, then TP |
+|---|---|---|---|---|---|---|
+| M15 Loose | 258 | 26.7% | 2.65R | 27.4% | −0.6pp | 19.0% |
+| M5 Loose | 129 | 27.9% | 2.47R | 28.8% | −0.9pp | 23.7% |
+| M1 Loose | 78 | 23.1% | 2.38R | 29.6% | **−6.5pp** | 30.0% |
+
+Always read `avg` as `Net R ÷ Trades` rather than trusting a glance at the cell.
+
 ### Measuring whether a stop is too tight
 
 "The read was right but I got stopped" is testable, not a feeling. After every
