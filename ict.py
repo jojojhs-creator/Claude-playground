@@ -250,7 +250,13 @@ def export_csv(m: Market, path: str) -> None:
 
 
 def load_csv(path: str, spread_override: float | None = None) -> Market:
-    """Rebuild a Market from export_csv output. No MT5 required."""
+    """
+    Rebuild a Market from export_csv output. No MT5 required.
+
+    Also accepts an Alpha Vantage daily/intraday CSV, which uses a `timestamp`
+    header and lists newest bar first — detected and reversed rather than
+    requiring the caller to know which flavour they have.
+    """
     meta: dict[str, str] = {}
     rows: list[tuple] = []
     with open(path) as f:
@@ -260,12 +266,18 @@ def load_csv(path: str, spread_override: float | None = None) -> Market:
                 continue
             if line.startswith("#"):
                 meta = dict(kv.split("=", 1) for kv in line[1:].split() if "=" in kv)
-            elif not line.startswith("time,"):
+            elif line.lower().startswith(("time,", "timestamp,")):
+                continue
+            else:
                 a = line.split(",")
                 rows.append((a[0], float(a[1]), float(a[2]), float(a[3]), float(a[4])))
     if not rows:
         raise ValueError(f"No bars in {path}")
+    if rows[0][0] > rows[-1][0]:            # newest-first (Alpha Vantage)
+        rows.reverse()
     t = np.array([r[0] for r in rows], dtype="datetime64[m]")
+    if "tf" not in meta and len(t) > 1:      # infer the bar size if unlabelled
+        meta["tf"] = str(max(1, int((t[1] - t[0]) / np.timedelta64(1, "m"))))
     o, h, l, c = (np.array([r[i] for r in rows], float) for i in (1, 2, 3, 4))
     spread = spread_override if spread_override is not None else float(meta.get("spread", 0.30))
     return Market(meta.get("symbol", "CSV"), int(meta.get("tf", 15)), spread,
