@@ -44,6 +44,14 @@ armBars = input.int(12, "Setup stays armed for (bars)", minval=1, group="Liquidi
 tradeReversal = input.bool(true, "Trade REVERSALS (sweep high -> short)", group="Liquidity")
 tradeCont = input.bool(true, "Trade CONTINUATIONS (sweep high, hold above -> long)", group="Liquidity")
 
+// ── Reversal quality ──────────────────────────────────────────────────────────
+// A reversal fades the move that just happened, so it only makes sense when the
+// LARGER move agrees. Below the trend line a swept low is the trend working, not
+// a trap, and buying it is fading an impulse.
+trendEma = input.int(0, "Reversals need trend agreement — EMA (0 = off)", minval=0, group="Reversal quality", tooltip="Only allows a reversal BUY above the EMA and a reversal SELL below it. Continuations are untouched; they are with the move by design. Try 200.")
+showTrend = input.bool(false, "Plot the trend EMA", group="Reversal quality")
+sweepMaxAtr = input.float(0.0, "Sweep must not overshoot by more than (x ATR, 0 = off)", minval=0.0, step=0.1, group="Reversal quality", tooltip="A raid pokes through a level and comes back. A trend blows straight through. Beyond this the level counts as broken, not swept: the pool is consumed but nothing arms. Try 0.5.")
+
 // ── CISD ──────────────────────────────────────────────────────────────────────
 minRunLen = input.int(2, "Min candles in the opposing run", minval=1, group="CISD")
 
@@ -137,6 +145,8 @@ slBufE   = slBufAtr * stopRoom
 minRiskE = minRiskAtrX * stopRoom
 maxRiskE = maxRiskAtr * stopRoom
 
+emaTrend = trendEma > 0 ? ta.ema(close, trendEma) : float(na)
+
 tfName = tfMin <= 1 ? "M1" : tfMin <= 5 ? "M5" : tfMin <= 15 ? "M15" : "M30+"
 
 atrV = ta.atr(14)
@@ -196,9 +206,11 @@ if array.size(poolHi) > 0
         if i < array.size(poolHi)
             lvl = array.get(poolHi, i)
             if high > lvl and (not requireCloseBackX or close < lvl)
-                sweptHigh := true
-                sweepHighPx := high
-                sweptHiLvl := lvl
+                // Blew straight through it? Then it was broken, not raided.
+                if sweepMaxAtr <= 0 or (high - lvl) <= atrV * sweepMaxAtr
+                    sweptHigh := true
+                    sweepHighPx := high
+                    sweptHiLvl := lvl
                 dl3 = array.get(poolHiLn, i)
                 if not na(dl3)
                     line.delete(dl3)
@@ -212,9 +224,10 @@ if array.size(poolLo) > 0
         if j < array.size(poolLo)
             lvl2 = array.get(poolLo, j)
             if low < lvl2 and (not requireCloseBackX or close > lvl2)
-                sweptLow := true
-                sweepLowPx := low
-                sweptLoLvl := lvl2
+                if sweepMaxAtr <= 0 or (lvl2 - low) <= atrV * sweepMaxAtr
+                    sweptLow := true
+                    sweepLowPx := low
+                    sweptLoLvl := lvl2
                 dl4 = array.get(poolLoLn, j)
                 if not na(dl4)
                     line.delete(dl4)
@@ -383,8 +396,12 @@ cooled = bar_index - lastSigBar >= cooldownBarsX
 ifvgBuyOk = not useIfvg or inBullIfvg
 ifvgSellOk = not useIfvg or inBearIfvg
 
-revBuy = tradeReversal and bullArmed and cisdBull and not na(sweepLowPx)
-revSell = tradeReversal and bearArmed and cisdBear and not na(sweepHighPx)
+// Reversals only in the direction the larger move already supports.
+// Continuations need no such gate — they are with the move by design.
+revTrendBuyOk = trendEma <= 0 or na(emaTrend) or close > emaTrend
+revTrendSellOk = trendEma <= 0 or na(emaTrend) or close < emaTrend
+revBuy = tradeReversal and bullArmed and cisdBull and not na(sweepLowPx) and revTrendBuyOk
+revSell = tradeReversal and bearArmed and cisdBear and not na(sweepHighPx) and revTrendSellOk
 contBuy = tradeCont and bearArmed and cisdBull and not na(sweptHiLvl) and close > sweptHiLvl
 contSell = tradeCont and bullArmed and cisdBear and not na(sweptLoLvl) and close < sweptLoLvl
 
@@ -625,6 +642,8 @@ if showStats and barstate.islast
     table.cell(stt, 1, 8, str.tostring(nStopThenTp) + " of " + str.tostring(nLosses) + "  (" + str.tostring(stpPct, "#.0") + "%)", text_color=stpCol, bgcolor=color.new(color.black, 75), text_size=size.tiny)
     table.cell(stt, 0, 9, autoTf ? "Auto " + tfName + " · " + strictness : "Manual", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 1, 9, "piv " + str.tostring(pivotLenX) + " / run " + str.tostring(minRunLenX) + " / " + str.tostring(minRRX, "#.0") + "-" + str.tostring(maxStructRRX, "#.0") + "R / stop x" + str.tostring(stopRoom, "#.#"), text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.tiny)
+
+plot(showTrend and trendEma > 0 ? emaTrend : na, "Trend EMA", color=color.new(color.gray, 40), linewidth=2)
 
 alertcondition(buySignal, "BUY", "BUY — sweep + CISD on {{ticker}} @ {{close}}")
 alertcondition(sellSignal, "SELL", "SELL — sweep + CISD on {{ticker}} @ {{close}}")

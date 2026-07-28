@@ -9,6 +9,7 @@ Run:  python ict.py XAUUSD 180 0.30 15      symbol, days, spread, timeframe(min)
       python ict.py XAUUSD 180 0.30 15 --tp=pool      target the next pool
       python ict.py XAUUSD 180 0.30 15 --tp=range --adr=1.3
       python ict.py XAUUSD 365 0.30 15 --sweep        grid search, 60/40 split
+      python ict.py XAUUSD 365 0.30 15 --revsweep     reversals only, 18 combos
       python ict.py XAUUSD 180 0.30 15 --manual       ignore the timeframe preset
       python ict.py XAUUSD 365 0.30 15 --mode=cont --arm=6 --tp=atr --rr=3
         override individual settings: --piv --arm --run --rr --mode --tp
@@ -99,13 +100,25 @@ class IctParams:
     adr_days: int = 14
     max_adr_used: float = 0.0
 
+    # ── Reversal quality ─────────────────────────────────────────────────────
+    # A reversal fades the move that just happened, so it only makes sense when
+    # the LARGER move agrees. Below the trend line a swept low is the trend
+    # doing its job, not a trap — buying it is fading an impulse. 0 disables.
+    trend_ema: int = 0
+    # A raid pokes through a level and comes back. A trend blows through it.
+    # Overshoot beyond this many ATR means the level was broken, not swept, so
+    # the pool is consumed but nothing arms. 0 disables.
+    sweep_max_atr: float = 0.0
+
     def label(self) -> str:
         mode = ("rev+cont" if self.trade_reversal and self.trade_continuation
                 else "rev" if self.trade_reversal else "cont")
         tp = f"tp:{self.tp_mode}" + (f"x{self.rr_mult:g}" if self.tp_mode == "atr" else "")
         adr = f" adr<{self.max_adr_used:g}" if self.max_adr_used > 0 else ""
+        ema = f" ema{self.trend_ema}" if self.trend_ema > 0 else ""
+        poke = f" poke{self.sweep_max_atr:g}" if self.sweep_max_atr > 0 else ""
         return (f"piv{self.pivot_len} arm{self.arm_bars} run{self.min_run_len} "
-                f"{tp} {mode}{adr}{' +ifvg' if self.use_ifvg else ''}")
+                f"{tp} {mode}{adr}{ema}{poke}{' +ifvg' if self.use_ifvg else ''}")
 
 
 @dataclass
@@ -146,6 +159,16 @@ def _atr(h, l, c, n=14):
         out[n] = tr[1:n + 1].mean()
         for i in range(n + 1, len(tr)):          # Wilder smoothing, as ta.atr
             out[i] = (out[i - 1] * (n - 1) + tr[i]) / n
+    return out
+
+
+def _ema(x, n):
+    out = np.full(len(x), np.nan)
+    if n > 0 and len(x) > n:
+        k = 2.0 / (n + 1)
+        out[n - 1] = x[:n].mean()
+        for i in range(n, len(x)):
+            out[i] = x[i] * k + out[i - 1] * (1 - k)
     return out
 
 
@@ -223,6 +246,7 @@ def compute_signals(m: Market, p: IctParams):
     pool_a = np.full(n, np.nan)                  # next opposing liquidity pool
     rng_a = np.full(n, np.nan)                   # high/low of the last day
     stretch, bpd = _day_stretch(m, p.adr_days)
+    ema = _ema(m.c, p.trend_ema) if p.trend_ema > 0 else np.full(n, np.nan)
     day_hi = _window(m.h, bpd, np.max)
     day_lo = _window(m.l, bpd, np.min)
     o, h, l, c, atr = m.o, m.h, m.l, m.c, m.atr
@@ -259,17 +283,23 @@ def compute_signals(m: Market, p: IctParams):
                 del pool_lo[:-p.max_pools]
 
         # ── sweeps: each pool can only be taken once ─────────────────────────
+        # A level that price blew straight through was broken, not raided. The
+        # pool is consumed either way — the liquidity is gone — but only a poke
+        # arms a trade.
         swept_hi = swept_lo = False
+        cap = atr[i] * p.sweep_max_atr if p.sweep_max_atr > 0 else np.inf
         for lvl in [x for x in pool_hi if h[i] > x and (not p.require_close_back or c[i] < x)]:
-            swept_hi = True
-            swept_hi_lvl = lvl
-            sweep_hi_px = h[i]
+            if h[i] - lvl <= cap:
+                swept_hi = True
+                swept_hi_lvl = lvl
+                sweep_hi_px = h[i]
         pool_hi = [x for x in pool_hi if not (h[i] > x and (not p.require_close_back or c[i] < x))]
 
         for lvl in [x for x in pool_lo if l[i] < x and (not p.require_close_back or c[i] > x)]:
-            swept_lo = True
-            swept_lo_lvl = lvl
-            sweep_lo_px = l[i]
+            if lvl - l[i] <= cap:
+                swept_lo = True
+                swept_lo_lvl = lvl
+                sweep_lo_px = l[i]
         pool_lo = [x for x in pool_lo if not (l[i] < x and (not p.require_close_back or c[i] > x))]
 
         if swept_hi:
@@ -324,8 +354,15 @@ def compute_signals(m: Market, p: IctParams):
         bull_armed = i - armed_bull <= p.arm_bars
         bear_armed = i - armed_bear <= p.arm_bars
 
-        rev_buy = p.trade_reversal and bull_armed and fired_bull and not np.isnan(sweep_lo_px)
-        rev_sell = p.trade_reversal and bear_armed and fired_bear and not np.isnan(sweep_hi_px)
+        # Reversals only in the direction the larger move already supports.
+        # Continuations need no such gate — they are with the move by design.
+        trend_up = None if np.isnan(ema[i]) else c[i] > ema[i]
+        rev_ok_buy = trend_up is not False
+        rev_ok_sell = trend_up is not True
+        rev_buy = (p.trade_reversal and bull_armed and fired_bull
+                   and not np.isnan(sweep_lo_px) and rev_ok_buy)
+        rev_sell = (p.trade_reversal and bear_armed and fired_bear
+                    and not np.isnan(sweep_hi_px) and rev_ok_sell)
         cont_buy = (p.trade_continuation and bear_armed and fired_bull
                     and not np.isnan(swept_hi_lvl) and c[i] > swept_hi_lvl)
         cont_sell = (p.trade_continuation and bull_armed and fired_bear
@@ -596,6 +633,50 @@ def run_sweep(m: Market, base: IctParams) -> None:
               f"{te['avg_r']:>+8.2f}{te['per']:>+9.2f}{te['n']:>8}")
 
 
+REV_GRID = {
+    "trend_ema": [0, 100, 200],
+    "sweep_max_atr": [0.0, 0.5, 1.0],
+    "arm_bars": [6, 12],
+}
+
+
+def run_rev_sweep(m: Market, base: IctParams) -> None:
+    """
+    Reversals only, small grid. 18 combinations instead of 540, because the
+    whole point is to find out whether two specific ideas work — not to fish.
+    A narrow grid is the only honest way to read a survivor list.
+    """
+    n = len(m.c)
+    split = int(n * 0.60)
+    combos = list(itertools.product(*REV_GRID.values()))
+    print(f"\nREVERSALS ONLY | train 0–{split} | test {split}–{n}")
+    print(f"{len(combos)} combinations — small on purpose\n")
+
+    rows = []
+    for ema, poke, arm in combos:
+        p = replace(base, trade_reversal=True, trade_continuation=False,
+                    trend_ema=ema, sweep_max_atr=poke, arm_bars=arm)
+        sig = compute_signals(m, p)
+        tr = stats(simulate(m, p, sig, 0, split))
+        te = stats(simulate(m, p, sig, split, n))
+        if tr["n"] < 15 or te["n"] < 15:
+            continue
+        rows.append((p, tr, te))
+
+    if not rows:
+        print("No combination produced enough reversal trades in both halves.")
+        return
+    rows.sort(key=lambda r: r[2]["per"], reverse=True)
+    print("=" * 82)
+    print(f"{'settings':<40}{'train R':>8}{'train $':>9}{'test R':>8}{'test $':>9}{'test n':>8}")
+    print("-" * 82)
+    for p, tr, te in rows:
+        flag = "  <-- both halves positive" if (tr["per"] > 0 and te["per"] > 0) else ""
+        print(f"{p.label():<40}{tr['avg_r']:>+8.2f}{tr['per']:>+9.2f}"
+              f"{te['avg_r']:>+8.2f}{te['per']:>+9.2f}{te['n']:>8}{flag}")
+    print("\nema0 poke0 is the current behaviour — the row every other row must beat.")
+
+
 def main() -> int:
     if mt5 is None:
         print("MetaTrader5 package not available (Windows only).")
@@ -631,6 +712,10 @@ def main() -> int:
             base = replace(base, min_run_len=int(a.split("=", 1)[1]))
         elif a.startswith("--rr="):
             base = replace(base, rr_mult=float(a.split("=", 1)[1]))
+        elif a.startswith("--ema="):
+            base = replace(base, trend_ema=int(a.split("=", 1)[1]))
+        elif a.startswith("--poke="):
+            base = replace(base, sweep_max_atr=float(a.split("=", 1)[1]))
         elif a.startswith("--mode="):
             mode = a.split("=", 1)[1]
             base = replace(base, trade_reversal=mode in ("rev", "both"),
@@ -640,7 +725,9 @@ def main() -> int:
         return 1
 
     m = load(symbol, days, spread, tf, cfg)
-    if "--sweep" in sys.argv:
+    if "--revsweep" in sys.argv:
+        run_rev_sweep(m, base)
+    elif "--sweep" in sys.argv:
         run_sweep(m, base)
     else:
         print(f"Params: {base.label()}")

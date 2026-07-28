@@ -184,6 +184,28 @@ Derived from the same three tables (avg winner from `netR = w·avgwin − l`):
 
 Always read `avg` as `Net R ÷ Trades` rather than trusting a glance at the cell.
 
+### Why reversals lose, and the two candidate fixes
+
+Reversals ran 183 trades at −0.16R (−$6,106) while continuations made +$2,677.
+The mechanism is visible on any chart where the model buys a swept low during a
+sustained drop: **the sweep was the trend passing through the level, not a raid
+on it.** Fading that is fading an impulse.
+
+Two filters address it directly, both off by default until measured:
+
+- **`trend_ema`** — a reversal BUY only above the EMA, SELL only below.
+  Continuations are untouched (they are with the move by construction). This is
+  the same filter that produced the only genuinely positive result in this
+  project: the opening-range indicator with an HTF gate, 134 trades, 55.2% win,
+  **avg +0.2R**.
+- **`sweep_max_atr`** — a raid pokes through a level and comes back; a trend
+  blows through it. Overshoot beyond this many ATR consumes the pool (the
+  liquidity is gone either way) but arms nothing.
+
+`ict.py --revsweep` tests them over **18** combinations, not 540. The narrow
+grid is the point: a survivor list from a small grid means something, and the
+`ema0 poke0` row is the current behaviour that everything else has to beat.
+
 ### Measuring whether a stop is too tight
 
 "The read was right but I got stopped" is testable, not a feeling. After every

@@ -156,6 +156,18 @@ def main() -> int:
         if len(idx) and dist.max() > q.max_risk_atr + 1e-9:
             fails.append(f"RISK CEILING: stop at {dist.max():.3f} ATR, cap {q.max_risk_atr}")
 
+    # 7c. Both reversal filters may only ever REMOVE trades, never add one,
+    #     and neither may touch a continuation.
+    base_rev = replace(p, trade_continuation=False)
+    n0 = len(simulate(m, base_rev))
+    for tag, q in (("trend", replace(base_rev, trend_ema=200)),
+                   ("poke", replace(base_rev, sweep_max_atr=0.5))):
+        if len(simulate(m, q)) > n0:
+            fails.append(f"{tag.upper()} FILTER: added reversal trades ({n0} -> {len(simulate(m, q))})")
+    cont = replace(p, trade_reversal=False)
+    if len(simulate(m, cont)) != len(simulate(m, replace(cont, trend_ema=200))):
+        fails.append("TREND FILTER: changed continuation trades, should not")
+
     # 8b. A tighter R cap can only shrink targets, never grow them.
     wide = {t.bar: t.tp for t in simulate(m, replace(p, tp_mode="pool", max_struct_rr=20))}
     for t in simulate(m, replace(p, tp_mode="pool", max_struct_rr=3)):
