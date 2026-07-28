@@ -593,12 +593,15 @@ var table stt = na
 if showStats and barstate.islast
     table.delete(stt)
     stt := table.new(f_tablePos(), 2, 10, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
-    wr = nTrades > 0 ? nWins / nTrades * 100 : 0.0
-    ex = nTrades > 0 ? sumR / nTrades : 0.0
+    // A trade still running has no result yet, so it must not dilute the win
+    // rate. nTrades counts it; nWins + nLosses does not.
+    nClosed = nWins + nLosses
+    wr = nClosed > 0 ? nWins / nClosed * 100 : 0.0
+    ex = nClosed > 0 ? sumR / nClosed : 0.0
     table.cell(stt, 0, 0, "RESULTS", text_color=color.gray, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 1, 0, "", bgcolor=color.new(color.black, 70))
     table.cell(stt, 0, 1, "Trades", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
-    table.cell(stt, 1, 1, str.tostring(nTrades), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
+    table.cell(stt, 1, 1, str.tostring(nClosed) + (inTrade ? " (+1 open)" : ""), text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
     table.cell(stt, 0, 2, "Win rate", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
     table.cell(stt, 1, 2, str.tostring(wr, "#.0") + "%", text_color=wr >= 50 ? color.teal : color.orange, bgcolor=color.new(color.black, 75), text_size=size.small)
     table.cell(stt, 0, 3, "W / L", text_color=color.white, bgcolor=color.new(color.black, 75), text_size=size.small)
@@ -606,7 +609,7 @@ if showStats and barstate.islast
     table.cell(stt, 0, 4, "Net R / avg", text_color=color.white, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 1, 4, str.tostring(sumR, "#.1") + "R / " + str.tostring(ex, "#.2") + "R", text_color=sumR > 0 ? color.teal : color.red, bgcolor=color.new(color.black, 70), text_size=size.small)
     table.cell(stt, 0, 5, "of which spread", text_color=color.gray, bgcolor=color.new(color.black, 75), text_size=size.small)
-    table.cell(stt, 1, 5, spreadPx <= 0 ? "not charged" : "-" + str.tostring(sumCostR, "#.1") + "R  (" + str.tostring(nTrades > 0 ? sumCostR / nTrades : 0, "#.2") + "R/trade)", text_color=spreadPx <= 0 ? color.orange : color.gray, bgcolor=color.new(color.black, 75), text_size=size.tiny)
+    table.cell(stt, 1, 5, spreadPx <= 0 ? "not charged" : "-" + str.tostring(sumCostR, "#.1") + "R  (" + str.tostring(nClosed > 0 ? sumCostR / nClosed : 0, "#.2") + "R/trade)", text_color=spreadPx <= 0 ? color.orange : color.gray, bgcolor=color.new(color.black, 75), text_size=size.tiny)
 
     // Live read on the session, and why setups were passed over
     stretchTxt = na(dayStretch) ? "n/a" : str.tostring(dayStretch, "#.00") + "x"
