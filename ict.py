@@ -10,6 +10,8 @@ Run:  python ict.py XAUUSD 180 0.30 15      symbol, days, spread, timeframe(min)
       python ict.py XAUUSD 180 0.30 15 --tp=range --adr=1.3
       python ict.py XAUUSD 365 0.30 15 --sweep        grid search, 60/40 split
       python ict.py XAUUSD 365 0.30 15 --revsweep     reversals only, 18 combos
+      python ict.py XAUUSD 365 0.30 15 --export       dump the bars to CSV
+      python ict.py XAUUSD 365 0.30 15 --csv=FILE --sweep    replay a CSV, no MT5
       python ict.py XAUUSD 180 0.30 15 --manual       ignore the timeframe preset
       python ict.py XAUUSD 365 0.30 15 --mode=cont --arm=6 --tp=atr --rr=3
         override individual settings: --piv --arm --run --rr --mode --tp
@@ -226,6 +228,49 @@ def load(symbol: str, days: int, spread_override: float | None,
     return Market(symbol, tf_minutes, spread, upu, lot,
                   df["time"].to_numpy(), df["open"].to_numpy(float), h, l, c,
                   _atr(h, l, c))
+
+
+def export_csv(m: Market, path: str) -> None:
+    """
+    Dump the fetched bars so they can be replayed without MetaTrader5.
+
+    MT5 is Windows-only and lives on the user's machine, so without this every
+    measurement has to be run by hand and pasted back. A file turns a day of
+    round-trips into an afternoon of experiments.
+    """
+    with open(path, "w") as f:
+        f.write(f"# symbol={m.symbol} tf={m.tf_minutes} lot={m.lot} "
+                f"upu={m.usd_per_unit} spread={m.spread}\n")
+        f.write("time,open,high,low,close\n")
+        for i in range(len(m.c)):
+            t = np.datetime_as_string(m.time[i], unit="m")
+            f.write(f"{t},{m.o[i]:.2f},{m.h[i]:.2f},{m.l[i]:.2f},{m.c[i]:.2f}\n")
+    mb = __import__("os").path.getsize(path) / 1e6
+    print(f"Wrote {path}  ({len(m.c)} bars, {mb:.1f} MB)")
+
+
+def load_csv(path: str, spread_override: float | None = None) -> Market:
+    """Rebuild a Market from export_csv output. No MT5 required."""
+    meta: dict[str, str] = {}
+    rows: list[tuple] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                meta = dict(kv.split("=", 1) for kv in line[1:].split() if "=" in kv)
+            elif not line.startswith("time,"):
+                a = line.split(",")
+                rows.append((a[0], float(a[1]), float(a[2]), float(a[3]), float(a[4])))
+    if not rows:
+        raise ValueError(f"No bars in {path}")
+    t = np.array([r[0] for r in rows], dtype="datetime64[m]")
+    o, h, l, c = (np.array([r[i] for r in rows], float) for i in (1, 2, 3, 4))
+    spread = spread_override if spread_override is not None else float(meta.get("spread", 0.30))
+    return Market(meta.get("symbol", "CSV"), int(meta.get("tf", 15)), spread,
+                  float(meta.get("upu", 20.0)), float(meta.get("lot", 0.2)),
+                  t, o, h, l, c, _atr(h, l, c))
 
 
 def compute_signals(m: Market, p: IctParams):
@@ -678,10 +723,11 @@ def run_rev_sweep(m: Market, base: IctParams) -> None:
 
 
 def main() -> int:
-    if mt5 is None:
-        print("MetaTrader5 package not available (Windows only).")
+    use_csv = any(a.startswith("--csv=") for a in sys.argv)
+    if mt5 is None and not use_csv:
+        print("MetaTrader5 package not available (Windows only). Use --csv=FILE.")
         return 1
-    cfg = load_config()
+    cfg = None if use_csv else load_config()
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     symbol = args[0] if args else cfg.symbols[0]
     days = int(args[1]) if len(args) > 1 else 90
@@ -724,7 +770,16 @@ def main() -> int:
         print("--tp must be atr, pool or range")
         return 1
 
-    m = load(symbol, days, spread, tf, cfg)
+    csv_arg = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--csv=")), None)
+    if csv_arg:
+        m = load_csv(csv_arg, spread)
+        print(f"Loaded {csv_arg}: {len(m.c)} bars of {m.tf_minutes}m, "
+              f"spread {m.spread:.2f}, ${m.usd_per_unit:.2f} per 1.00 move")
+    else:
+        m = load(symbol, days, spread, tf, cfg)
+    if "--export" in sys.argv:
+        export_csv(m, f"{symbol.lower()}_m{tf}_{days}d.csv")
+        return 0
     if "--revsweep" in sys.argv:
         run_rev_sweep(m, base)
     elif "--sweep" in sys.argv:
